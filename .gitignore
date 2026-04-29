@@ -1,0 +1,9 @@
+.env
+.codex
+CLAUDE.md
+CODEX_ONBOARDING.md
+artifacts/
+data/
+__pycache__/
+.venv/
+useful_prompts_answers.md

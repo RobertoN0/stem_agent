@@ -1,0 +1,47 @@
+# Stem Agent — configuration tunables.
+# All knobs the orchestrator and agent read at startup live here.
+
+paths:
+  artifacts_dir: artifacts
+  runs_dir: artifacts/runs
+  data_dir: data/primevul
+  agent_dir: agent
+  tools_dir: tools
+
+model:
+  # Default model used by solve tasks. Reflection can use a stronger model.
+  name: gpt-5.4-mini
+  reflect_name: gpt-5.4
+
+budget:
+  # Hard generation cap. Cost is tracked and logged, not used as a stop gate.
+  max_generations: 15
+
+splits:
+  # PrimeVul subset sizes, balanced between vulnerable and safe.
+  train: 30
+  val: 15
+  test: 30
+
+stopping:
+  # Plateau: stop after this many consecutive generations with no val improvement.
+  plateau_generations: 3
+
+sandbox:
+  # Per-task limits enforced on the Docker subprocess.
+  image: stem-agent-sandbox
+  memory_mb: 1024
+  cpu_cores: 1
+  wall_clock_timeout_s: 300
+  reflect_wall_clock_timeout_s: 600
+  network: false
+
+pricing:
+  # USD per 1,000,000 tokens. Used to estimate spend from API usage.
+  # These are approximations — the real bill lives on the OpenAI dashboard.
+  gpt-5.4-mini:
+    input: 0.75
+    output: 4.50
+  gpt-5.4:
+    input: 2.50
+    output: 15.00

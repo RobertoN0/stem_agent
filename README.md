@@ -1,0 +1,132 @@
+# Stem Agent
+
+A self-modifying LLM agent for security-focused code analysis. The agent
+starts as a minimal "stem" with generic tools and evolves itself, generation
+by generation, into a specialized agent for vulnerability detection on
+PrimeVul.
+
+## Architecture Rules
+
+- `orchestrator.py` is fixed rollback infrastructure; the evolving agent must
+  never edit it.
+- The agent may only evolve files under `agent/` and `tools/`.
+- Each candidate generation is snapshotted under `artifacts/gen_N/`; snapshots
+  are append-only runtime artifacts and are not committed.
+- Candidates run in Docker subprocesses, never imported into the host
+  orchestrator process.
+- Train, validation, and test splits are kept separate: validation gates
+  evolution, and test is reserved for final reporting.
+
+## Prerequisites
+
+- **Python 3.11+**
+- **Docker** — every candidate generation runs in a Docker subprocess with
+  resource limits and network disabled. The orchestrator will not work
+  without a working Docker daemon. Install Docker Engine (Linux) or Docker
+  Desktop (macOS/Windows) and confirm with:
+
+  ```sh
+  docker run --rm hello-world
+  ```
+
+- An **OpenAI API key**.
+
+## Setup
+
+1. Clone the repo and `cd` into it.
+2. Create and activate a virtualenv:
+
+   ```sh
+   python3.11 -m venv .venv
+   source .venv/bin/activate
+   ```
+
+3. Install Python dependencies. There are two requirements files:
+   - `requirements.txt` — the minimal set baked into the sandbox image
+   - `requirements-host.txt` — adds host-only deps (`datasets`) for the
+     orchestrator and the dataset builder
+
+   On the host, install the full set:
+
+   ```sh
+   pip install -r requirements-host.txt
+   ```
+
+4. Create a `.env` file in the repo root with your API key:
+
+   ```
+   OPENAI_API_KEY=sk-...
+   ```
+
+   `.env` is gitignored — never commit it.
+
+5. Build the sandbox image (build context must be the repo root, since the
+   Dockerfile copies in `requirements.txt` and `sandbox/runner.py`):
+
+   ```sh
+   docker build -f sandbox/Dockerfile -t stem-agent-sandbox .
+   ```
+
+## Running
+
+The evolution loop is driven by the orchestrator:
+
+```sh
+python orchestrator.py
+```
+
+All tunables (models, generation caps, split sizes, stopping criteria, sandbox
+limits, token pricing) live in [config.yaml](config.yaml). Each run gets a
+timestamped directory under `artifacts/runs/`, containing:
+
+- `log.jsonl` — every orchestrator event (start, gates, accept/reject, errors)
+- `config.snapshot.yaml` — copy of the active config at run start, so the run
+  is reproducible after config drifts
+
+## Dataset
+
+The dataset builder (`python -m eval.dataset`) tries Hugging Face sources
+in this order and uses the first that loads:
+
+1. `colin/PrimeVul`
+2. `bstee615/bigvul`
+3. `DetectVul/devign`
+
+Splits are subsampled to 30 train / 15 val / 30 test, balanced 50/50
+between vulnerable and safe, with `random.seed(42)`. The chosen source
+and resulting sizes are recorded in `data/primevul/_source.json`. Add
+`--force` to rebuild from scratch.
+
+## Sandbox network policy
+
+The candidate's container runs with `--network none`. The agent has no
+direct internet access; LLM calls go through `tools.base.llm_call`, which
+proxies a structured request back to the orchestrator via the runner's
+stdin/stdout RPC. The orchestrator makes the OpenAI call and returns the
+response. See `agent/AGENT.md` for the rule that bans `import openai` in
+agent code.
+
+## Cost tracking
+
+Cost numbers in the log come from the orchestrator's own tally of every
+LLM call's `usage.prompt_tokens` and `usage.completion_tokens` (read off
+the OpenAI API response), multiplied by the per-million-token prices in
+`config.yaml`'s `pricing` block. Because the orchestrator is the only
+process that talks to OpenAI, this is ground truth from our side — the
+agent cannot under-report. Cost is logged for auditability, not used as a
+stop gate. The OpenAI dashboard is still authoritative for the actual bill
+(rate-limit retries, tokenizer drift, etc.), but the in-log number is much
+closer than self-report would be.
+
+## Tests
+
+```sh
+pytest tests/
+```
+
+Tests mock the Docker subprocess, so they run without a Docker daemon.
+
+## Layout
+
+Core source lives in `orchestrator.py`, `agent/`, `tools/`, `growth/`, `eval/`,
+and `sandbox/`. Local agent-editing rules live in `agent/AGENT.md`.
