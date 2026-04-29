@@ -184,6 +184,151 @@ def test_add_tool_allows_stdlib_from_allowlist(gen_dir):
     assert "hash_str" in (gen_dir / "tools" / "base.py").read_text()
 
 
+# --- apply.py: multi-edit bundles -----------------------------------------
+
+def test_multi_edit_bundle_applies_all_changes(gen_dir):
+    tool_code = (
+        "def count_chars(src: str) -> int:\n"
+        '    """Count source characters."""\n'
+        "    return len(src)\n"
+    )
+    apply_proposal(
+        {
+            "rationale": "task t1 showed weak prompt and missing helper",
+            "intent": "iterate",
+            "changes": [
+                {"kind": "edit_prompt", "details": {"content": "bundle prompt"}},
+                {"kind": "create_file",
+                 "details": {"path": "agent/heuristics.py", "content": "RULES = []\n"}},
+                {"kind": "add_tool",
+                 "details": {"name": "count_chars", "code": tool_code}},
+            ],
+        },
+        str(gen_dir),
+    )
+
+    assert (gen_dir / "agent" / "prompt.txt").read_text() == "bundle prompt"
+    assert (gen_dir / "agent" / "heuristics.py").read_text() == "RULES = []\n"
+    assert "def count_chars" in (gen_dir / "tools" / "base.py").read_text()
+
+
+def test_multi_edit_bundle_rolls_back_when_later_change_invalid(gen_dir):
+    original_prompt = (gen_dir / "agent" / "prompt.txt").read_text()
+    original_tools = (gen_dir / "tools" / "base.py").read_text()
+
+    with pytest.raises(ValueError, match="not in the allowlist"):
+        apply_proposal(
+            {
+                "rationale": "task t1",
+                "intent": "iterate",
+                "changes": [
+                    {"kind": "edit_prompt", "details": {"content": "should rollback"}},
+                    {"kind": "add_tool",
+                     "details": {
+                         "name": "fetch_url",
+                         "code": (
+                             "def fetch_url(url: str) -> str:\n"
+                             "    import requests\n"
+                             "    return requests.get(url).text\n"
+                         ),
+                     }},
+                ],
+            },
+            str(gen_dir),
+        )
+
+    assert (gen_dir / "agent" / "prompt.txt").read_text() == original_prompt
+    assert (gen_dir / "tools" / "base.py").read_text() == original_tools
+
+
+# --- apply.py: edit_tool / delete_tool ------------------------------------
+
+def test_edit_tool_replaces_existing_function(gen_dir):
+    code = (
+        "def read_file(path: str) -> str:\n"
+        '    """Read a file with a marker."""\n'
+        "    return 'patched:' + path\n"
+    )
+    apply_proposal(
+        {"kind": "edit_tool", "details": {"name": "read_file", "code": code}},
+        str(gen_dir),
+    )
+    new_src = (gen_dir / "tools" / "base.py").read_text()
+    assert "patched:" in new_src
+    assert "open(path).read()" not in new_src
+
+
+def test_edit_tool_rejects_missing_function(gen_dir):
+    code = "def missing_tool() -> int:\n    return 1\n"
+    with pytest.raises(ValueError, match="function not found"):
+        apply_proposal(
+            {"kind": "edit_tool",
+             "details": {"name": "missing_tool", "code": code}},
+            str(gen_dir),
+        )
+
+
+def test_delete_tool_removes_existing_function(gen_dir):
+    tools_path = gen_dir / "tools" / "base.py"
+    tools_path.write_text(
+        tools_path.read_text()
+        + "\n\ndef helper_tool() -> int:\n"
+        + "    return 1\n"
+    )
+
+    apply_proposal(
+        {"kind": "delete_tool", "details": {"name": "helper_tool"}},
+        str(gen_dir),
+    )
+    assert "def helper_tool" not in tools_path.read_text()
+
+
+def test_delete_tool_rejects_protected_core_tool(gen_dir):
+    with pytest.raises(ValueError, match="protected core tool"):
+        apply_proposal(
+            {"kind": "delete_tool", "details": {"name": "read_file"}},
+            str(gen_dir),
+        )
+
+
+# --- apply.py: create_file / delete_file ----------------------------------
+
+def test_create_file_creates_nested_file_under_agent(gen_dir):
+    apply_proposal(
+        {"kind": "create_file",
+         "details": {"path": "agent/heuristics/rules.py", "content": "RULES = []\n"}},
+        str(gen_dir),
+    )
+    assert (gen_dir / "agent" / "heuristics" / "rules.py").read_text() == "RULES = []\n"
+
+
+def test_create_file_rejects_path_escape(gen_dir):
+    with pytest.raises(ValueError, match="relative"):
+        apply_proposal(
+            {"kind": "create_file",
+             "details": {"path": "../escape.py", "content": "x = 1\n"}},
+            str(gen_dir),
+        )
+
+
+def test_delete_file_deletes_existing_file(gen_dir):
+    target = gen_dir / "tools" / "obsolete.py"
+    target.write_text("OLD = True\n")
+    apply_proposal(
+        {"kind": "delete_file", "details": {"path": "tools/obsolete.py"}},
+        str(gen_dir),
+    )
+    assert not target.exists()
+
+
+def test_delete_file_rejects_protected_file(gen_dir):
+    with pytest.raises(ValueError, match="protected file"):
+        apply_proposal(
+            {"kind": "delete_file", "details": {"path": "agent/agent.py"}},
+            str(gen_dir),
+        )
+
+
 # --- apply.py: top-level rejection -----------------------------------------
 
 def test_unknown_kind_raises(gen_dir):
