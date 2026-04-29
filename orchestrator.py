@@ -638,13 +638,9 @@ class LLMCallLogger:
                 f.write(json.dumps(rec) + "\n")
 
 
-# --- trajectory selection & no-op detection ---------------------------------
+# --- trajectory selection & proposal helpers --------------------------------
 
-_KEY_FILES = (
-    ("agent", "agent.py"),
-    ("agent", "prompt.txt"),
-    ("tools", "base.py"),
-)
+_MUTABLE_DIRS = ("agent", "tools")
 
 
 def _select_trajectories(
@@ -674,21 +670,73 @@ def _select_trajectories(
     return failures[:max_failures] + successes[:max_successes]
 
 
-def _read_key_files(gen_dir: Path) -> dict:
-    """Read the bytes of the files apply_proposal can write, for no-op detection."""
+def _read_mutable_files(gen_dir: Path) -> dict:
+    """Read bytes for all files the evolving agent may change.
+
+    Multi-edit proposals can create/delete arbitrary files under agent/ and
+    tools/, so no-op detection has to compare the whole mutable tree rather
+    than only agent.py, prompt.txt, and tools/base.py.
+    """
     out = {}
-    for parts in _KEY_FILES:
-        p = gen_dir.joinpath(*parts)
-        if p.exists():
-            out[str(p.relative_to(gen_dir))] = p.read_bytes()
+    for dirname in _MUTABLE_DIRS:
+        root = gen_dir / dirname
+        if not root.exists():
+            continue
+        for p in sorted(root.rglob("*")):
+            if p.is_file():
+                out[str(p.relative_to(gen_dir))] = p.read_bytes()
     return out
+
+
+def _proposal_changes(proposal: dict) -> list:
+    if not isinstance(proposal, dict):
+        return []
+    if "changes" in proposal:
+        changes = proposal.get("changes")
+        return changes if isinstance(changes, list) else []
+    if "kind" in proposal:
+        return [proposal]
+    return []
+
+
+def _proposal_kinds(proposal: dict) -> list:
+    kinds = []
+    for change in _proposal_changes(proposal):
+        if isinstance(change, dict) and isinstance(change.get("kind"), str):
+            kinds.append(change["kind"])
+    return kinds
+
+
+def _proposal_kind_label(proposal: dict) -> str:
+    kinds = _proposal_kinds(proposal)
+    if not kinds:
+        return "none"
+    if len(kinds) == 1:
+        return kinds[0]
+    return "bundle"
+
+
+def _proposal_intent(proposal: dict) -> str:
+    if isinstance(proposal, dict) and proposal.get("intent") == "halt":
+        return "halt"
+    return "iterate"
+
+
+def _proposal_rationale(proposal: dict) -> str:
+    if not isinstance(proposal, dict):
+        return ""
+    rationale = proposal.get("rationale")
+    if isinstance(rationale, str):
+        return rationale
+    details = proposal.get("details") or {}
+    fallback = details.get("rationale")
+    return fallback if isinstance(fallback, str) else ""
 
 
 def _rationale_cites_failure(proposal: dict, trajectories: list) -> bool:
     """True iff the proposal's rationale mentions any failure task_id shown."""
-    details = proposal.get("details") or {}
-    rationale = details.get("rationale") or ""
-    if not isinstance(rationale, str):
+    rationale = _proposal_rationale(proposal)
+    if not rationale:
         return False
     failure_ids = {
         str(t.get("task_id"))
@@ -833,21 +881,32 @@ def main() -> None:
                     break
                 continue
 
+            proposal_kind = _proposal_kind_label(proposal)
+            proposal_kinds = _proposal_kinds(proposal)
+            proposal_intent = _proposal_intent(proposal)
+            proposal_rationale = _proposal_rationale(proposal)
+
             log("proposal",
-                kind=proposal.get("kind"),
-                rationale=(proposal.get("details") or {}).get("rationale", "")[:300])
+                kind=proposal_kind,
+                kinds=proposal_kinds,
+                intent=proposal_intent,
+                rationale=proposal_rationale[:300])
 
             if not _rationale_cites_failure(proposal, trajectories):
                 log("reflect_rationale_unjustified",
-                    kind=proposal.get("kind"),
-                    rationale=(proposal.get("details") or {}).get("rationale", "")[:300])
+                    kind=proposal_kind,
+                    kinds=proposal_kinds,
+                    intent=proposal_intent,
+                    rationale=proposal_rationale[:300])
 
-            before_files = _read_key_files(candidate_dir)
+            before_files = _read_mutable_files(candidate_dir)
             try:
                 apply_proposal(proposal, str(candidate_dir))
             except ValueError as e:
                 log("proposal_invalid",
-                    kind=proposal.get("kind"),
+                    kind=proposal_kind,
+                    kinds=proposal_kinds,
+                    intent=proposal_intent,
                     error=str(e))
                 shutil.rmtree(candidate_dir)
                 if _bump_plateau_or_stop("proposal_invalid"):
@@ -860,18 +919,29 @@ def main() -> None:
                     break
                 continue
 
-            after_files = _read_key_files(candidate_dir)
-            if before_files == after_files:
-                log("proposal_noop", kind=proposal.get("kind"))
+            halt_requested = proposal_intent == "halt"
+            after_files = _read_mutable_files(candidate_dir)
+            if before_files == after_files and not halt_requested:
+                log("proposal_noop", kind=proposal_kind, kinds=proposal_kinds)
                 shutil.rmtree(candidate_dir)
                 if _bump_plateau_or_stop("proposal_noop"):
                     break
                 continue
 
+            if halt_requested:
+                log("agent_halt",
+                    stage="requested",
+                    rationale=proposal_rationale[:300],
+                    kinds=proposal_kinds)
+
             if not smoke_test(candidate_dir, config, task=val_split[0],
                               llm_handler=handler, log_event=log):
                 log("gate_reject", stage="smoke")
                 shutil.rmtree(candidate_dir)
+                if halt_requested:
+                    stop_reason = "agent_halt"
+                    log("stop", reason=stop_reason, after="smoke_fail")
+                    break
                 if _bump_plateau_or_stop("smoke_fail"):
                     break
                 continue
@@ -889,10 +959,12 @@ def main() -> None:
                 cost_usd=cand_score["cost_usd"],
                 tokens=cand_score["usage"])
 
+            accepted = False
             if validation_gate(parent_macro_f1, cand_score["macro_f1"]):
                 log("gate_accept",
                     parent_f1=parent_macro_f1,
                     candidate_f1=cand_score["macro_f1"])
+                accepted = True
                 parent_dir = candidate_dir
                 parent_score = cand_score
                 parent_macro_f1 = cand_score["macro_f1"]
@@ -906,6 +978,15 @@ def main() -> None:
                     parent_f1=parent_macro_f1,
                     candidate_f1=cand_score["macro_f1"])
                 plateau += 1
+
+            if halt_requested:
+                stop_reason = "agent_halt"
+                log("stop",
+                    reason=stop_reason,
+                    accepted=accepted,
+                    parent_f1=parent_macro_f1,
+                    candidate_f1=cand_score["macro_f1"])
+                break
 
             if plateau >= plateau_limit:
                 stop_reason = "plateau"

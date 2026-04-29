@@ -261,6 +261,63 @@ def test_rationale_cites_failure_true_and_false():
     assert cites_only_success is False
 
 
+def test_rationale_cites_failure_reads_top_level_bundle_rationale():
+    trajectories = [
+        {"task_id": "t1", "ok": False, "errored": False},
+        {"task_id": "t2", "ok": True, "errored": False},
+    ]
+    proposal = {
+        "rationale": "task t1 exposed a missed bounds check",
+        "intent": "iterate",
+        "changes": [
+            {"kind": "edit_prompt", "details": {"content": "new prompt"}},
+        ],
+    }
+    assert orchestrator._rationale_cites_failure(proposal, trajectories) is True
+
+
+def test_proposal_summary_helpers_support_bundles_and_halt():
+    bundle = {
+        "rationale": "task t1",
+        "intent": "halt",
+        "changes": [
+            {"kind": "create_file", "details": {"path": "agent/x.py", "content": ""}},
+            {"kind": "edit_solve_loop", "details": {"content": "def solve_task(t): pass"}},
+        ],
+    }
+    legacy = {"kind": "edit_prompt", "details": {"rationale": "task t1"}}
+
+    assert orchestrator._proposal_kinds(bundle) == ["create_file", "edit_solve_loop"]
+    assert orchestrator._proposal_kind_label(bundle) == "bundle"
+    assert orchestrator._proposal_intent(bundle) == "halt"
+    assert orchestrator._proposal_rationale(bundle) == "task t1"
+
+    assert orchestrator._proposal_kinds(legacy) == ["edit_prompt"]
+    assert orchestrator._proposal_kind_label(legacy) == "edit_prompt"
+    assert orchestrator._proposal_intent(legacy) == "iterate"
+    assert orchestrator._proposal_rationale(legacy) == "task t1"
+
+
+def test_read_mutable_files_covers_created_and_deleted_files(tmp_path):
+    gen_dir = tmp_path
+    (gen_dir / "agent").mkdir()
+    (gen_dir / "agent" / "agent.py").write_text("def solve_task(t): pass\n")
+    (gen_dir / "agent" / "extra.py").write_text("EXTRA = 1\n")
+    (gen_dir / "tools").mkdir()
+    (gen_dir / "tools" / "base.py").write_text("# tools\n")
+
+    before = orchestrator._read_mutable_files(gen_dir)
+    assert set(before) == {"agent/agent.py", "agent/extra.py", "tools/base.py"}
+
+    (gen_dir / "agent" / "extra.py").unlink()
+    (gen_dir / "tools" / "new_tool.py").write_text("NEW = 1\n")
+    after = orchestrator._read_mutable_files(gen_dir)
+
+    assert "agent/extra.py" not in after
+    assert after["tools/new_tool.py"] == b"NEW = 1\n"
+    assert before != after
+
+
 def test_aggregate_per_task_carries_raw_and_error():
     config = {"model": {"name": "gpt-5.4-mini"}, "pricing": {}}
     results = [

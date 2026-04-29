@@ -2,8 +2,8 @@
 
 Reads the previous generation's val score, a curated set of failure and success
 trajectories (selected by the orchestrator), and the current agent code.
-Builds a meta-prompt and asks the model for ONE proposal of kind
-`add_tool`, `edit_prompt`, or `edit_solve_loop`. Output is structured JSON.
+Builds a meta-prompt and asks the model for one bundled improvement proposal.
+Output is structured JSON using `{rationale, intent, changes}`.
 
 Failure modes (orchestrator handles each distinctly):
 - Returns `None` if the gateway call fails or content is empty.
@@ -18,7 +18,16 @@ from pathlib import Path
 from typing import Optional
 
 
-_VALID_KINDS = frozenset(["edit_prompt", "edit_solve_loop", "add_tool"])
+_VALID_KINDS = frozenset([
+    "edit_prompt",
+    "edit_solve_loop",
+    "add_tool",
+    "edit_tool",
+    "delete_tool",
+    "create_file",
+    "delete_file",
+])
+_VALID_INTENTS = frozenset(["iterate", "halt"])
 _FAILURE_CODE_CUTOFF = 1500
 _SUCCESS_CODE_CUTOFF = 600
 
@@ -219,39 +228,54 @@ CURRENT AGENT CODE
 YOUR PROPOSAL
 ══════════════════════════════════════════════════════════════════════
 
-Choose the ONE change most likely to improve macro-F1 on the next val run.
-Think about which failure trajectories above share a root cause, then choose
-the kind that addresses that root cause most directly.
+Choose the smallest coherent proposal likely to improve macro-F1 on the next
+val run. Prefer a single change. Use a short bundle only when the changes are
+tightly coupled, for example creating a helper file and updating agent.py to
+import it.
 
-Allowed proposal kinds — pick exactly one:
+Output exactly this top-level shape:
 
-{{"kind": "edit_prompt",
- "details": {{
-   "content": "<complete replacement text for agent/prompt.txt>",
-   "rationale": "<what root cause this fixes, citing specific task_ids above>"
- }}}}
+{{
+  "rationale": "<what root cause this fixes, citing specific task_ids above>",
+  "intent": "iterate",
+  "changes": [
+    {{"kind": "edit_prompt", "details": {{"content": "<complete agent/prompt.txt>"}}}},
+    {{"kind": "edit_solve_loop", "details": {{"content": "<complete agent/agent.py>"}}}},
+    {{"kind": "add_tool", "details": {{"name": "<function_name>", "code": "<complete Python def block>"}}}},
+    {{"kind": "edit_tool", "details": {{"name": "<existing_function_name>", "code": "<complete replacement Python def block>"}}}},
+    {{"kind": "delete_tool", "details": {{"name": "<existing_non_core_function_name>"}}}},
+    {{"kind": "create_file", "details": {{"path": "agent/x.py", "content": "<new file content>"}}}},
+    {{"kind": "delete_file", "details": {{"path": "agent/old.py"}}}}
+  ]
+}}
 
-{{"kind": "edit_solve_loop",
- "details": {{
-   "content": "<complete replacement text for agent/agent.py, ALL imports included>",
-   "rationale": "<what root cause this fixes, citing specific task_ids above>"
- }}}}
+Use `"intent": "halt"` only if the current agent is good enough and further
+evolution is likely to overfit or regress. If intent is "halt", changes may be
+an empty list.
 
-{{"kind": "add_tool",
- "details": {{
-   "name": "<function_name>",
-   "code": "<complete Python def block, including docstring>",
-   "rationale": "<what root cause this fixes, citing specific task_ids above>"
- }}}}
+Allowed change kinds:
+- edit_prompt: replace all of agent/prompt.txt.
+- edit_solve_loop: replace all of agent/agent.py, including imports.
+- add_tool: append one new public function to tools/base.py.
+- edit_tool: replace one existing public function in tools/base.py.
+- delete_tool: delete one non-core public function from tools/base.py.
+- create_file: create a new file under agent/ or tools/.
+- delete_file: delete a non-protected file under agent/ or tools/.
 
 Additional constraints:
+- "rationale" must name at least one specific task_id from the trajectories above.
 - edit_prompt / edit_solve_loop: "content" is the COMPLETE new file, not a diff.
 - edit_solve_loop: "content" must contain `def solve_task(task: dict) -> dict:`.
-- add_tool: the function may only import from this allowlist:
+- add_tool / edit_tool: code must define exactly one function whose name matches "name".
+- add_tool / edit_tool: the function may only import from this allowlist:
     re, ast, json, os, os.path, pathlib, subprocess, math,
     collections, itertools, functools, typing, datetime,
     hashlib, base64, textwrap. Nothing else.
-- "rationale" must name at least one specific task_id from the trajectories above.
+- delete_tool must not delete core tools: llm_call, read_file, write_file,
+  list_dir, run_bash, note.
+- delete_file must not delete protected files: agent/agent.py,
+  agent/prompt.txt, tools/base.py.
+- create_file / delete_file paths must be relative and under agent/ or tools/.
 
 Output only the JSON object now:"""
 
@@ -293,11 +317,50 @@ def _parse_proposal(content: str) -> dict:
         raise ValueError(f"invalid JSON: {e}")
     if not isinstance(proposal, dict):
         raise ValueError(f"top-level must be an object, got {type(proposal).__name__}")
-    kind = proposal.get("kind")
-    if kind not in _VALID_KINDS:
-        raise ValueError(f"kind must be one of {sorted(_VALID_KINDS)}, got {kind!r}")
-    if not isinstance(proposal.get("details"), dict):
-        raise ValueError("details must be an object")
+
+    # Backwards compatibility: accept old single-edit proposals and normalize
+    # them into the new bundle schema.
+    if "kind" in proposal:
+        kind = proposal.get("kind")
+        if kind not in _VALID_KINDS:
+            raise ValueError(f"kind must be one of {sorted(_VALID_KINDS)}, got {kind!r}")
+        details = proposal.get("details")
+        if not isinstance(details, dict):
+            raise ValueError("details must be an object")
+        rationale = details.get("rationale") or ""
+        if not isinstance(rationale, str):
+            rationale = ""
+        return {
+            "rationale": rationale,
+            "intent": "iterate",
+            "changes": [{"kind": kind, "details": details}],
+        }
+
+    rationale = proposal.get("rationale")
+    if not isinstance(rationale, str):
+        raise ValueError("rationale must be a string")
+
+    intent = proposal.get("intent")
+    if intent not in _VALID_INTENTS:
+        raise ValueError(f"intent must be one of {sorted(_VALID_INTENTS)}, got {intent!r}")
+
+    changes = proposal.get("changes")
+    if not isinstance(changes, list):
+        raise ValueError("changes must be a list")
+
+    for idx, change in enumerate(changes):
+        if not isinstance(change, dict):
+            raise ValueError(
+                f"changes[{idx}] must be an object, got {type(change).__name__}"
+            )
+        kind = change.get("kind")
+        if kind not in _VALID_KINDS:
+            raise ValueError(
+                f"changes[{idx}].kind must be one of {sorted(_VALID_KINDS)}, got {kind!r}"
+            )
+        if not isinstance(change.get("details"), dict):
+            raise ValueError(f"changes[{idx}].details must be an object")
+
     return proposal
 
 

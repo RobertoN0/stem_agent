@@ -15,6 +15,7 @@ from growth.reflect import (
     _compute_confusion,
     _extract_tools_api,
     _build_messages,
+    _parse_proposal,
 )
 
 
@@ -400,6 +401,10 @@ def test_build_messages_includes_failures_and_code(gen_dir):
     assert "edit_prompt" in user
     assert "edit_solve_loop" in user
     assert "add_tool" in user
+    assert "edit_tool" in user
+    assert "create_file" in user
+    assert "\"intent\": \"iterate\"" in user
+    assert "\"changes\"" in user
 
 
 # --- reflect.py: handler interaction ---------------------------------------
@@ -424,8 +429,11 @@ def _fake_handler_failing():
 
 def test_reflect_returns_parsed_proposal(gen_dir):
     proposal_json = json.dumps({
-        "kind": "edit_prompt",
-        "details": {"content": "new prompt", "rationale": "task t1"},
+        "rationale": "task t1 showed prompt confusion",
+        "intent": "iterate",
+        "changes": [
+            {"kind": "edit_prompt", "details": {"content": "new prompt"}},
+        ],
     })
     calls = []
     handler = _fake_handler_returning(proposal_json, calls=calls)
@@ -438,8 +446,10 @@ def test_reflect_returns_parsed_proposal(gen_dir):
         score={"per_task": [], "macro_f1": 0.0, "accuracy": 0.0, "n_tasks": 0},
         gen_idx=0,
     )
-    assert out["kind"] == "edit_prompt"
-    assert out["details"]["content"] == "new prompt"
+    assert out["rationale"] == "task t1 showed prompt confusion"
+    assert out["intent"] == "iterate"
+    assert out["changes"][0]["kind"] == "edit_prompt"
+    assert out["changes"][0]["details"]["content"] == "new prompt"
 
     # The envelope must carry purpose=reflect, task_id=None, response_format=json_object
     assert calls[0]["purpose"] == "reflect"
@@ -460,8 +470,11 @@ def test_reflect_returns_none_when_handler_fails(gen_dir):
 
 def test_reflect_retries_once_on_bad_json(gen_dir):
     """First response is garbage; second must be valid JSON. Should succeed."""
-    valid = json.dumps({"kind": "edit_prompt",
-                        "details": {"content": "x", "rationale": "t1"}})
+    valid = json.dumps({
+        "rationale": "task t1",
+        "intent": "iterate",
+        "changes": [{"kind": "edit_prompt", "details": {"content": "x"}}],
+    })
     responses = ["this is not json", valid]
     calls = []
 
@@ -478,8 +491,53 @@ def test_reflect_retries_once_on_bad_json(gen_dir):
         config={"model": {"name": "gpt-5.4-mini"}},
         score={"per_task": []},
     )
-    assert out["kind"] == "edit_prompt"
+    assert out["changes"][0]["kind"] == "edit_prompt"
     assert len(calls) == 2  # original + one retry
+
+
+def test_reflect_wraps_legacy_single_edit_proposal(gen_dir):
+    legacy = json.dumps({
+        "kind": "edit_prompt",
+        "details": {"content": "legacy prompt", "rationale": "task t1"},
+    })
+
+    out = reflect(
+        trajectories=[],
+        current_gen_dir=str(gen_dir),
+        llm_handler=_fake_handler_returning(legacy),
+        config={"model": {"name": "gpt-5.4-mini"}},
+        score={"per_task": []},
+    )
+
+    assert out == {
+        "rationale": "task t1",
+        "intent": "iterate",
+        "changes": [
+            {
+                "kind": "edit_prompt",
+                "details": {"content": "legacy prompt", "rationale": "task t1"},
+            },
+        ],
+    }
+
+
+def test_parse_proposal_accepts_halt_with_empty_changes():
+    out = _parse_proposal(json.dumps({
+        "rationale": "validation is saturated on shown tasks",
+        "intent": "halt",
+        "changes": [],
+    }))
+    assert out["intent"] == "halt"
+    assert out["changes"] == []
+
+
+def test_parse_proposal_rejects_bad_change_details():
+    with pytest.raises(ValueError, match="changes\\[0\\]\\.details"):
+        _parse_proposal(json.dumps({
+            "rationale": "task t1",
+            "intent": "iterate",
+            "changes": [{"kind": "edit_prompt", "details": "not an object"}],
+        }))
 
 
 def test_reflect_raises_when_retry_also_fails(gen_dir):
