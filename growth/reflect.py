@@ -1,6 +1,6 @@
 """Reflection step — produce a structured JSON proposal for the next generation.
 
-Reads the previous generation's val score, a curated set of failure and success
+Reads the previous generation's feedback score, a curated set of failure and success
 trajectories (selected by the orchestrator), and the current agent code.
 Builds a meta-prompt and asks the model for one bundled improvement proposal.
 Output is structured JSON using `{rationale, intent, changes}`.
@@ -144,6 +144,7 @@ def _build_messages(
     agent_py: str,
     prompt_txt: str,
     tools_api: str,
+    score_split: str = "val",
 ) -> list:
     cm = _compute_confusion(score.get("per_task", []))
     n_tasks = score.get("n_tasks", 0)
@@ -177,7 +178,9 @@ def _build_messages(
         "4. Inside the sandbox, /agent is read-only and /work is per-task scratch "
         "(wiped between tasks).\n"
         "5. The orchestrator, growth/, eval/, and sandbox/ are completely invisible "
-        "to the agent.\n\n"
+        "to the agent.\n"
+        "6. Prefer bounded tools such as static_scan over open-ended run_bash; "
+        "do not introduce repeated static-analysis retries.\n\n"
         "Output rules:\n"
         "- Your response must be a single JSON object and absolutely nothing else.\n"
         "- No markdown fences, no prose before or after, no \"Here is my proposal:\".\n"
@@ -187,7 +190,7 @@ def _build_messages(
 
     user_msg = f"""\
 ══════════════════════════════════════════════════════════════════════
-PERFORMANCE  ·  generation {gen_idx}  ·  val split  ·  {n_tasks} tasks
+PERFORMANCE  ·  generation {gen_idx}  ·  {score_split} split  ·  {n_tasks} tasks
 ══════════════════════════════════════════════════════════════════════
 
   macro-F1 : {macro_f1:.3f}    accuracy : {accuracy:.3f}
@@ -272,7 +275,7 @@ Additional constraints:
     collections, itertools, functools, typing, datetime,
     hashlib, base64, textwrap. Nothing else.
 - delete_tool must not delete core tools: llm_call, read_file, write_file,
-  list_dir, run_bash, note.
+  list_dir, run_bash, static_scan, note.
 - delete_file must not delete protected files: agent/agent.py,
   agent/prompt.txt, tools/base.py.
 - create_file / delete_file paths must be relative and under agent/ or tools/.
@@ -373,6 +376,7 @@ def reflect(
     config: Optional[dict] = None,
     score: Optional[dict] = None,
     gen_idx: int = 0,
+    score_split: str = "val",
 ) -> Optional[dict]:
     """Produce a structured JSON proposal for the next generation.
 
@@ -385,7 +389,7 @@ def reflect(
 
     gen_dir = Path(current_gen_dir)
     model_cfg = (config or {}).get("model", {})
-    model = model_cfg.get("reflect_name") or model_cfg.get("name", "gpt-5.4-mini")
+    model = model_cfg.get("reflect_name") or model_cfg.get("name", "gpt-5.4")
 
     try:
         agent_py = (gen_dir / "agent" / "agent.py").read_text()
@@ -397,6 +401,7 @@ def reflect(
     messages = _build_messages(
         gen_idx=gen_idx,
         score=score or {},
+        score_split=score_split,
         trajectories=trajectories or [],
         agent_py=agent_py,
         prompt_txt=prompt_txt,

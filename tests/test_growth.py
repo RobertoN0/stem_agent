@@ -292,6 +292,20 @@ def test_delete_tool_rejects_protected_core_tool(gen_dir):
         )
 
 
+def test_delete_tool_rejects_static_scan_core_tool(gen_dir):
+    tools_path = gen_dir / "tools" / "base.py"
+    tools_path.write_text(
+        tools_path.read_text()
+        + "\n\ndef static_scan(code: str):\n    return {}\n"
+    )
+
+    with pytest.raises(ValueError, match="protected core tool"):
+        apply_proposal(
+            {"kind": "delete_tool", "details": {"name": "static_scan"}},
+            str(gen_dir),
+        )
+
+
 # --- apply.py: create_file / delete_file ----------------------------------
 
 def test_create_file_creates_nested_file_under_agent(gen_dir):

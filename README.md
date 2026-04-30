@@ -10,8 +10,9 @@ PrimeVul.
 - `orchestrator.py` is fixed rollback infrastructure; the evolving agent must
   never edit it.
 - The agent may only evolve files under `agent/` and `tools/`.
-- Each candidate generation is snapshotted under `artifacts/gen_N/`; snapshots
-  are append-only runtime artifacts and are not committed.
+- Each experiment keeps candidate snapshots under
+  `artifacts/runs/<run_id>/generations/gen_N/`; snapshots are append-only
+  runtime artifacts and are not committed.
 - Candidates run in Docker subprocesses, never imported into the host
   orchestrator process.
 - Train, validation, and test splits are kept separate: validation gates
@@ -80,8 +81,13 @@ limits, token pricing) live in [config.yaml](config.yaml). Each run gets a
 timestamped directory under `artifacts/runs/`, containing:
 
 - `log.jsonl` — every orchestrator event (start, gates, accept/reject, errors)
+- `llm_calls.jsonl` — every proxied model call with usage and timing
+- `terminal_output.out` — the same human-readable progress stream printed to
+  the terminal, flushed automatically during the run
 - `config.snapshot.yaml` — copy of the active config at run start, so the run
   is reproducible after config drifts
+- `generations/gen_N/` — the full agent/tool snapshot for each generation in
+  that run
 
 ## Dataset
 

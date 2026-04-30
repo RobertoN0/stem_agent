@@ -7,7 +7,7 @@ returns aggregated `accuracy`, `macro_f1`, and `per_task` scores plus
 token totals.
 
 CLI:
-    python -m eval.benchmark --gen artifacts/gen_0 --split val [--limit N]
+    python -m eval.benchmark --gen artifacts/runs/<run_id>/generations/gen_0 --split val [--limit N]
 """
 
 import argparse
@@ -39,6 +39,8 @@ def run_benchmark(
     split = load_split(split_name, project_root=project_root, config=config)
     if limit is not None:
         split = split[:limit]
+    if log_event:
+        log_event("eval_start", split=split_name, n_tasks=len(split), limit=limit)
 
     gen_path = Path(gen_dir)
     if not gen_path.is_absolute():
@@ -56,66 +58,93 @@ def main() -> None:
                         help="cap the number of tasks (for quick checks)")
     parser.add_argument("--run-id", default=None,
                         help="if set, write a log.jsonl under artifacts/runs/<run-id>/")
+    parser.add_argument("--quiet", action="store_true",
+                        help="disable human-readable terminal progress logs")
+    parser.add_argument("--verbose", action="store_true",
+                        help="include lower-level runner/event details in terminal logs")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(project_root))
 
-    log_event = None
+    from orchestrator import (
+        ConsoleLogger,
+        EventFanout,
+        TranscriptLogger,
+        load_config,
+        make_llm_handler,
+    )
+
+    config = load_config(project_root / args.config)
+    console_log = ConsoleLogger(enabled=not args.quiet, verbose=args.verbose)
+    progress_log = console_log
+    log_event = console_log
     llm_handler = None
+    llm_log = None
+    transcript_log = None
+
     if args.run_id:
-        from orchestrator import RunLogger, LLMCallLogger, make_llm_handler, load_config
-        config = load_config(project_root / args.config)
+        from orchestrator import RunLogger, LLMCallLogger
         run_dir = project_root / config["paths"]["runs_dir"] / args.run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         import shutil
         shutil.copy(project_root / args.config, run_dir / "config.snapshot.yaml")
-        logger = RunLogger(run_dir)
-        logger("benchmark_start", gen=args.gen, split=args.split, limit=args.limit)
-        log_event = logger
-
+        run_logger = RunLogger(run_dir)
         llm_log = LLMCallLogger(run_dir)
-        try:
-            from dotenv import load_dotenv
-            load_dotenv(project_root / ".env")
-        except ImportError:
-            pass
-        try:
-            from openai import OpenAI
-            llm_handler = make_llm_handler(OpenAI(), config["model"]["name"],
-                                           llm_logger=llm_log)
-        except Exception:
-            pass
-    else:
-        # Load .env so the orchestrator's OpenAI client picks up the key.
-        try:
-            from dotenv import load_dotenv
-            load_dotenv(project_root / ".env")
-        except ImportError:
-            pass
+        transcript_log = TranscriptLogger(run_dir, verbose=args.verbose)
+        progress_log = EventFanout(console_log, transcript_log)
+        log_event = EventFanout(run_logger, progress_log)
+        import shlex
+        log_event("transcript_start",
+                  path=str(transcript_log.path),
+                  command=shlex.join([sys.executable, *sys.argv]))
 
-    result = run_benchmark(args.gen, args.split, args.config,
-                           limit=args.limit, log_event=log_event,
-                           llm_handler=llm_handler)
+    log_event("benchmark_start", gen=args.gen, split=args.split, limit=args.limit)
 
-    if log_event:
-        log_event("benchmark_complete",
-                  macro_f1=result["macro_f1"],
-                  accuracy=result["accuracy"],
-                  n_tasks=result["n_tasks"],
-                  n_errors=result["n_errors"],
-                  cost_usd=result["cost_usd"],
-                  tokens=result["usage"])
+    # Load .env so the orchestrator's OpenAI client picks up the key.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(project_root / ".env")
+    except ImportError:
+        pass
+    try:
+        from openai import OpenAI
+        llm_handler = make_llm_handler(
+            OpenAI(),
+            config["model"]["name"],
+            llm_logger=llm_log,
+            console_logger=progress_log,
+        )
+    except Exception:
+        pass
 
-    print(json.dumps({
-        "macro_f1": result["macro_f1"],
-        "accuracy": result["accuracy"],
-        "n_tasks": result["n_tasks"],
-        "n_errors": result["n_errors"],
-        "cost_usd": result["cost_usd"],
-        "usage": result["usage"],
-        "per_task": result["per_task"],
-    }, indent=2))
+    try:
+        result = run_benchmark(args.gen, args.split, args.config,
+                               limit=args.limit, log_event=log_event,
+                               llm_handler=llm_handler)
+
+        if log_event:
+            log_event("benchmark_complete",
+                      split=args.split,
+                      macro_f1=result["macro_f1"],
+                      accuracy=result["accuracy"],
+                      n_tasks=result["n_tasks"],
+                      n_errors=result["n_errors"],
+                      cost_usd=result["cost_usd"],
+                      tokens=result["usage"])
+
+        print(json.dumps({
+            "macro_f1": result["macro_f1"],
+            "accuracy": result["accuracy"],
+            "n_tasks": result["n_tasks"],
+            "n_errors": result["n_errors"],
+            "cost_usd": result["cost_usd"],
+            "usage": result["usage"],
+            "per_task": result["per_task"],
+        }, indent=2))
+    finally:
+        if transcript_log is not None:
+            transcript_log.close()
 
 
 if __name__ == "__main__":

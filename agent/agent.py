@@ -1,20 +1,26 @@
 """gen_0 agent — ReAct loop solve_task() implementation.
 
-Uses native tool calling to investigate code snippets via static analysis
-(bandit, semgrep) and targeted reading before submitting a final verdict.
+Uses native tool calling to investigate code snippets via bounded static scans
+and targeted reading before submitting a final verdict.
 Future generations may extend the tool set or rewrite this loop entirely.
 Hard rules for editing this file live in agent/AGENT.md.
 """
 
 import json
+import re
 from pathlib import Path
 
-from tools.base import llm_call, read_file, run_bash, note
+from tools.base import llm_call, read_file, run_bash, static_scan, note
 
 
 _PROMPT_PATH = Path(__file__).parent / "prompt.txt"
-_MODEL = "gpt-5.4-mini"
+_MODEL = "gpt-5.4"
 _MAX_STEPS = 10
+_CWE_RE = re.compile(r"\bCWE-\d+\b", re.IGNORECASE)
+_LABEL_FIELD_RE = re.compile(
+    r"\b(?:label|verdict)\s*[:=-]\s*(vulnerable|safe)\b",
+    re.IGNORECASE,
+)
 
 # Tools the model may call. `finalize` is the harness sentinel and is NOT
 # dispatched through _dispatch — it ends the loop.
@@ -36,22 +42,29 @@ _TOOL_SPECS = [
     {
         "type": "function",
         "function": {
-            "name": "run_bash",
+            "name": "static_scan",
             "description": (
-                "Run a shell command in /work. Returns {stdout, stderr, returncode}. "
-                "Use for static analysis: write the code to /work/snippet.c then run "
-                "semgrep or bandit."
+                "Run a bounded static scan of the current task code. Returns "
+                "{language, heuristic_findings, external}. Use at most once when "
+                "manual review is uncertain; do not retry after timeout/unavailable."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "cmd": {"type": "string", "description": "Shell command."},
+                    "language": {
+                        "type": "string",
+                        "enum": ["python", "c_cpp", "unknown"],
+                        "description": "Best-effort language hint for the current snippet.",
+                    },
+                    "run_external": {
+                        "type": "boolean",
+                        "description": "Whether to also run semgrep/bandit with a short timeout. Default false.",
+                    },
                     "timeout": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default 30).",
+                        "description": "External scanner timeout in seconds, capped by the tool.",
                     },
                 },
-                "required": ["cmd"],
             },
         },
     },
@@ -101,7 +114,7 @@ _TOOL_SPECS = [
 ]
 
 
-def _dispatch(name: str, args: dict):
+def _dispatch(name: str, args: dict, task_code: str = ""):
     """Call the named tool and return a JSON-serialisable result."""
     if name == "read_file":
         try:
@@ -110,11 +123,76 @@ def _dispatch(name: str, args: dict):
             return f"error: {e}"
     elif name == "run_bash":
         return run_bash(args.get("cmd", ""), timeout=args.get("timeout", 30))
+    elif name == "static_scan":
+        return static_scan(
+            task_code,
+            language=args.get("language"),
+            run_external=bool(args.get("run_external", False)),
+            timeout=args.get("timeout", 5),
+        )
     elif name == "note":
         note(args.get("text", ""))
         return "noted"
     else:
         return f"unknown tool: {name}"
+
+
+def _clean_label(value):
+    if not isinstance(value, str):
+        return None
+    label = value.strip().lower()
+    return label if label in ("vulnerable", "safe") else None
+
+
+def _result_from_finalize(task_id, finalize_args: dict) -> dict:
+    label = _clean_label(finalize_args.get("label"))
+    return {
+        "task_id": task_id,
+        "label": label,
+        "cwe": finalize_args.get("cwe"),
+        "reasoning": finalize_args.get("reasoning"),
+        "raw": json.dumps(finalize_args),
+    }
+
+
+def _coerce_text_verdict(content: str | None) -> dict | None:
+    """Accept common text-only verdicts when the model forgets tool calling."""
+    if not isinstance(content, str):
+        return None
+    text = content.strip()
+    if not text:
+        return None
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        label = _clean_label(parsed.get("label"))
+        if label is not None:
+            return {
+                "label": label,
+                "cwe": parsed.get("cwe"),
+                "reasoning": parsed.get("reasoning") or text,
+            }
+
+    lowered = text.lower()
+    if lowered.startswith("vulnerable"):
+        label = "vulnerable"
+    elif lowered.startswith("safe"):
+        label = "safe"
+    else:
+        match = _LABEL_FIELD_RE.search(text[:120])
+        label = match.group(1).lower() if match else None
+    if label is None:
+        return None
+
+    cwe_match = _CWE_RE.search(text)
+    return {
+        "label": label,
+        "cwe": cwe_match.group(0).upper() if cwe_match else None,
+        "reasoning": text,
+    }
 
 
 def solve_task(task: dict) -> dict:
@@ -134,7 +212,10 @@ def solve_task(task: dict) -> dict:
     ]
 
     for _step in range(_MAX_STEPS):
-        resp = llm_call(history, model=_MODEL, tools=_TOOL_SPECS, tool_choice="auto")
+        tool_choice = "auto"
+        if _step == _MAX_STEPS - 1:
+            tool_choice = {"type": "function", "function": {"name": "finalize"}}
+        resp = llm_call(history, model=_MODEL, tools=_TOOL_SPECS, tool_choice=tool_choice)
         content = resp.get("content")
         tool_calls = resp.get("tool_calls")
 
@@ -145,7 +226,16 @@ def solve_task(task: dict) -> dict:
         history.append(assistant_msg)
 
         if not tool_calls:
-            # Text-only turn — model is reasoning out loud; continue loop.
+            coerced = _coerce_text_verdict(content)
+            if coerced is not None:
+                return _result_from_finalize(task_id, coerced)
+            history.append({
+                "role": "user",
+                "content": (
+                    "Use the finalize tool now. Do not answer in plain text; "
+                    "submit exactly one label via finalize."
+                ),
+            })
             continue
 
         tool_result_msgs = []
@@ -167,7 +257,7 @@ def solve_task(task: dict) -> dict:
                     "content": "finalized",
                 })
             else:
-                result = _dispatch(fn_name, fn_args)
+                result = _dispatch(fn_name, fn_args, task_code=code)
                 tool_result_msgs.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
@@ -179,17 +269,6 @@ def solve_task(task: dict) -> dict:
         history.extend(tool_result_msgs)
 
         if finalize_args is not None:
-            label = finalize_args.get("label")
-            if isinstance(label, str):
-                label = label.strip().lower()
-                if label not in ("vulnerable", "safe"):
-                    label = None
-            return {
-                "task_id": task_id,
-                "label": label,
-                "cwe": finalize_args.get("cwe"),
-                "reasoning": finalize_args.get("reasoning"),
-                "raw": json.dumps(finalize_args),
-            }
+            return _result_from_finalize(task_id, finalize_args)
 
     return {"task_id": task_id, "label": None, "error": "max_steps exceeded"}

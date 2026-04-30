@@ -13,6 +13,7 @@ host-side tests) `llm_call` raises immediately.
 import datetime as _dt
 import json as _json
 import os as _os
+import re as _re
 import subprocess as _subprocess
 import uuid as _uuid
 from pathlib import Path
@@ -91,6 +92,133 @@ def run_bash(cmd: str, timeout: int = 30) -> dict:
             "returncode": -1,
         }
     return {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode}
+
+
+def _normalize_language(code: str, language: str | None) -> str:
+    if isinstance(language, str):
+        lang = language.strip().lower().replace("-", "_")
+        if lang in {"py", "python"}:
+            return "python"
+        if lang in {"c", "cpp", "c++", "cc", "c_cpp"}:
+            return "c_cpp"
+
+    sample = code[:2000]
+    if _re.search(r"^\s*(def|import|from)\s+", sample, _re.MULTILINE):
+        return "python"
+    if any(token in sample for token in ("#include", "::", "->", "malloc(", "free(", ";")):
+        return "c_cpp"
+    return "unknown"
+
+
+def _add_finding(findings: list, rule_id: str, severity: str, message: str, evidence: str) -> None:
+    findings.append({
+        "rule_id": rule_id,
+        "severity": severity,
+        "message": message,
+        "evidence": evidence.strip()[:240],
+    })
+
+
+def _heuristic_scan(code: str, language: str) -> list:
+    findings = []
+    checks = []
+    if language == "python":
+        checks = [
+            (r"\beval\s*\(", "PY-EVAL", "high", "eval() on attacker-influenced input can execute code."),
+            (r"\bexec\s*\(", "PY-EXEC", "high", "exec() on attacker-influenced input can execute code."),
+            (r"\bpickle\.loads?\s*\(", "PY-PICKLE", "high", "pickle deserialization can execute code."),
+            (r"\byaml\.load\s*\(", "PY-YAML-LOAD", "medium", "yaml.load() can deserialize unsafe objects."),
+            (r"\bos\.system\s*\(", "PY-OS-SYSTEM", "high", "os.system() can allow command injection."),
+            (r"subprocess\.[A-Za-z_]+\s*\([^)]*shell\s*=\s*True", "PY-SHELL-TRUE", "high", "subprocess with shell=True is injection-prone."),
+        ]
+    elif language == "c_cpp":
+        checks = [
+            (r"\bgets\s*\(", "CWE-242", "high", "gets() cannot bound input and is inherently unsafe."),
+            (r"\bstrcpy\s*\(", "CWE-120", "high", "strcpy() copies without a destination size."),
+            (r"\bstrcat\s*\(", "CWE-120", "high", "strcat() appends without a destination size."),
+            (r"\bsprintf\s*\(", "CWE-120", "high", "sprintf() writes without an output bound."),
+            (r"\bscanf\s*\(\s*\"[^\"]*%s", "CWE-120", "medium", "scanf %s without a width limit can overflow."),
+            (r"\bmemcpy\s*\([^;]+,\s*[^;]+,\s*[^;]+\)", "CWE-119", "medium", "memcpy() needs independent size validation."),
+            (r"\b(?:malloc|realloc|new|reserve|resize|String)\s*\([^;\n]*(?:\*|<<|\+)[^;\n]*\)", "CWE-190", "medium", "allocation or reserve size uses arithmetic that may need overflow checks."),
+            (r"\bfree\s*\([^)]*\)\s*;[^{}]*(?:return|goto)?[^{}]*\b\w+\s*=", "CWE-416", "low", "state after free should be checked for dangling use or double-free risk."),
+        ]
+    for pattern, rule_id, severity, message in checks:
+        match = _re.search(pattern, code, _re.IGNORECASE | _re.DOTALL)
+        if match:
+            _add_finding(findings, rule_id, severity, message, match.group(0))
+    return findings
+
+
+def _external_scan(code: str, language: str, timeout: int, work_dir: str) -> dict:
+    if language == "python":
+        ext = ".py"
+        cmd = ["bandit", "-q", "-f", "json"]
+        tool = "bandit"
+    elif language == "c_cpp":
+        ext = ".cpp"
+        cmd = ["semgrep", "--quiet", "--json", "--config=p/c"]
+        tool = "semgrep"
+    else:
+        return {"status": "skipped", "reason": f"unsupported language: {language}"}
+
+    root = _safe_path(work_dir, write=True)
+    root.mkdir(parents=True, exist_ok=True)
+    snippet = root / f"snippet{ext}"
+    snippet.write_text(code)
+    try:
+        proc = _subprocess.run(
+            cmd + [str(snippet)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(root),
+        )
+    except FileNotFoundError:
+        return {"status": "unavailable", "tool": tool}
+    except _subprocess.TimeoutExpired as e:
+        stdout = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+        stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+        return {
+            "status": "timeout",
+            "tool": tool,
+            "timeout_s": timeout,
+            "stdout_tail": stdout[-1000:],
+            "stderr_tail": stderr[-1000:],
+        }
+
+    return {
+        "status": "ok",
+        "tool": tool,
+        "returncode": proc.returncode,
+        "stdout_tail": proc.stdout[-4000:],
+        "stderr_tail": proc.stderr[-2000:],
+    }
+
+
+def static_scan(
+    code: str,
+    language: str | None = None,
+    run_external: bool = False,
+    timeout: int = 5,
+    work_dir: str = "/work/static_scan",
+) -> dict:
+    """Run a bounded, structured static scan over a code snippet."""
+    code = code or ""
+    try:
+        timeout_s = max(1, min(int(timeout), 8))
+    except (TypeError, ValueError):
+        timeout_s = 5
+    scan_code = code[:50000]
+    lang = _normalize_language(scan_code, language)
+    result = {
+        "language": lang,
+        "truncated": len(code) > len(scan_code),
+        "heuristic_findings": _heuristic_scan(scan_code, lang),
+        "external": {"status": "skipped", "reason": "run_external is false"},
+    }
+    if run_external:
+        result["external"] = _external_scan(scan_code, lang, timeout_s, work_dir)
+    return result
 
 
 def note(text: str) -> None:

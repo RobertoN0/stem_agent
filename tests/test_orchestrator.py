@@ -4,6 +4,7 @@ Docker is not invoked — tests either monkeypatch run_one_task or drive
 _run_task_protocol directly with fake send/recv callables.
 """
 
+import io
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -86,6 +87,37 @@ def test_bootstrap_refuses_when_only_tools_missing(tmp_path, basic_config):
     (tmp_path / "agent" / "agent.py").write_text("def solve_task(t): pass\n")
     with pytest.raises(FileNotFoundError, match="tools"):
         orchestrator.bootstrap_gen0(basic_config, tmp_path)
+
+
+def test_bootstrap_can_target_run_scoped_generation_root(seeded_project, basic_config):
+    run_gen_root = seeded_project / "artifacts" / "runs" / "run_x" / "generations"
+
+    gen0 = orchestrator.bootstrap_gen0(
+        basic_config,
+        seeded_project,
+        artifacts_root=run_gen_root,
+    )
+
+    assert gen0 == run_gen_root / "gen_0"
+    assert (gen0 / "agent" / "agent.py").exists()
+    assert (gen0 / "tools" / "base.py").exists()
+    assert not (seeded_project / "artifacts" / "gen_0").exists()
+
+
+def test_snapshot_ignores_python_cache_artifacts(seeded_project, basic_config):
+    (seeded_project / "agent" / "__pycache__").mkdir()
+    (seeded_project / "agent" / "__pycache__" / "agent.cpython-312.pyc").write_bytes(b"x")
+    (seeded_project / "tools" / "__pycache__").mkdir()
+    (seeded_project / "tools" / "__pycache__" / "base.cpython-312.pyc").write_bytes(b"x")
+
+    gen0 = orchestrator.bootstrap_gen0(basic_config, seeded_project)
+    gen1 = seeded_project / "artifacts" / "gen_1"
+    orchestrator.copy_snapshot(gen0, gen1)
+
+    assert not (gen0 / "agent" / "__pycache__").exists()
+    assert not (gen0 / "tools" / "__pycache__").exists()
+    assert not (gen1 / "agent" / "__pycache__").exists()
+    assert not (gen1 / "tools" / "__pycache__").exists()
 
 
 def test_aggregate_counts_errors_as_wrong():
@@ -343,3 +375,160 @@ def test_runner_marker_parser_extracts_start_and_end():
     assert markers["start"]["py"] == "3.11.9"
     assert markers["end"]["rc"] == "0"
     assert markers["end"]["task_id"] == "t42"
+
+
+def test_console_logger_formats_progress_without_prompt_payloads():
+    stream = io.StringIO()
+    logger = orchestrator.ConsoleLogger(stream=stream)
+    logger.set_gen(2)
+
+    logger("task_start", task_idx=1, n_tasks=3, task_id="t1")
+    logger("llm_call",
+           purpose="solve_task",
+           task_id="t1",
+           step_in_task=1,
+           model="gpt-5.4-mini",
+           duration_ms=1234,
+           prompt_tokens=100,
+           completion_tokens=25,
+           messages=[{"role": "user", "content": "secret prompt payload"}])
+    logger("task_result",
+           task_idx=1,
+           n_tasks=3,
+           task_id="t1",
+           predicted="safe",
+           expected="vulnerable",
+           ok=False,
+           errored=False,
+           n_llm_calls=1)
+
+    out = stream.getvalue()
+    assert "gen=2 task 1/3 start id=t1" in out
+    assert "llm purpose=solve_task task=t1 step=1 model=gpt-5.4-mini" in out
+    assert "tokens=100+25" in out
+    assert "status=wrong pred=safe expected=vulnerable calls=1" in out
+    assert "secret prompt payload" not in out
+
+
+def test_console_logger_summarizes_tool_activity():
+    stream = io.StringIO()
+    logger = orchestrator.ConsoleLogger(stream=stream)
+
+    logger("llm_call",
+           purpose="solve_task",
+           task_id="t1",
+           step_in_task=2,
+           model="gpt-5.4",
+           duration_ms=250,
+           prompt_tokens=200,
+           completion_tokens=30,
+           tool_results=["static_scan:c_cpp:findings=1:ext=skipped"],
+           response_tools=["finalize"],
+           response_kind="tools")
+
+    out = stream.getvalue()
+    assert "tool_results=static_scan:c_cpp:findings=1:ext=skipped" in out
+    assert "response_tools=finalize" in out
+
+
+def test_transcript_logger_writes_terminal_output_file(tmp_path):
+    logger = orchestrator.TranscriptLogger(tmp_path)
+    logger.set_gen(3)
+    logger("task_start", task_idx=1, n_tasks=2, task_id="t1")
+    logger.close()
+
+    out_path = tmp_path / "terminal_output.out"
+    assert out_path.exists()
+    assert "gen=3 task 1/2 start id=t1" in out_path.read_text()
+
+
+def test_event_fanout_writes_jsonl_and_console(tmp_path):
+    run_logger = orchestrator.RunLogger(tmp_path)
+    stream = io.StringIO()
+    console = orchestrator.ConsoleLogger(stream=stream)
+    logger = orchestrator.EventFanout(run_logger, console)
+
+    logger.set_gen(4)
+    logger("proposal",
+           kind="edit_prompt",
+           kinds=["edit_prompt"],
+           intent="iterate",
+           rationale="task t1")
+
+    rec = json.loads((tmp_path / "log.jsonl").read_text().splitlines()[0])
+    assert rec["gen"] == 4
+    assert rec["event"] == "proposal"
+    assert "gen=4 proposal kind=edit_prompt intent=iterate" in stream.getvalue()
+
+
+def test_validation_gate_rejects_candidate_with_execution_errors():
+    parent = {"macro_f1": 0.70, "n_errors": 0}
+    better_but_errorful = {"macro_f1": 0.90, "n_errors": 1}
+    clean_improvement = {"macro_f1": 0.71, "n_errors": 0}
+
+    assert orchestrator.validation_gate(parent, better_but_errorful) is False
+    assert orchestrator.validation_gate(parent, clean_improvement) is True
+
+
+def test_cost_estimate_uses_usage_model_not_only_default_model():
+    config = {
+        "model": {"name": "gpt-5.4-mini"},
+        "pricing": {
+            "gpt-5.4-mini": {"input": 1.0, "output": 2.0},
+            "gpt-5.4": {"input": 10.0, "output": 20.0},
+        },
+    }
+    usage = {
+        "prompt_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+        "model": "gpt-5.4-2026-03-17",
+    }
+
+    assert orchestrator._estimate_cost_usd(usage, config) == pytest.approx(30.0)
+
+
+def test_pricing_model_match_prefers_longest_prefix():
+    config = {
+        "model": {"name": "gpt-5.4-mini"},
+        "pricing": {
+            "gpt-5.4": {"input": 10.0, "output": 20.0},
+            "gpt-5.4-mini": {"input": 1.0, "output": 2.0},
+        },
+    }
+    usage = {
+        "prompt_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+        "model": "gpt-5.4-mini-2026-03-17",
+    }
+
+    assert orchestrator._estimate_cost_usd(usage, config) == pytest.approx(3.0)
+
+
+def test_llm_usage_tracker_counts_reflection_model_costs():
+    config = {
+        "model": {"name": "gpt-5.4-mini"},
+        "pricing": {
+            "gpt-5.4-mini": {"input": 1.0, "output": 2.0},
+            "gpt-5.4": {"input": 10.0, "output": 20.0},
+        },
+    }
+    tracker = orchestrator.LLMUsageTracker(config)
+
+    tracker.add({
+        "prompt_tokens": 1_000,
+        "completion_tokens": 100,
+        "model": "gpt-5.4-mini-2026-03-17",
+    })
+    tracker.add({
+        "prompt_tokens": 2_000,
+        "completion_tokens": 200,
+        "model": "gpt-5.4-2026-03-17",
+    })
+
+    snapshot = tracker.snapshot()
+    assert snapshot["n_calls"] == 2
+    assert snapshot["prompt_tokens"] == 3_000
+    assert snapshot["completion_tokens"] == 300
+    assert snapshot["cost_usd"] == pytest.approx(
+        ((1_000 * 1.0) + (100 * 2.0) + (2_000 * 10.0) + (200 * 20.0)) / 1_000_000
+    )

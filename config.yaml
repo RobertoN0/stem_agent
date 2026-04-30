@@ -9,8 +9,8 @@ paths:
   tools_dir: tools
 
 model:
-  # Default model used by solve tasks. Reflection can use a stronger model.
-  name: gpt-5.4-mini
+  # Default model used by solve tasks. Reflection uses the same family model.
+  name: gpt-5.4
   reflect_name: gpt-5.4
 
 budget:
@@ -39,9 +39,6 @@ sandbox:
 pricing:
   # USD per 1,000,000 tokens. Used to estimate spend from API usage.
   # These are approximations — the real bill lives on the OpenAI dashboard.
-  gpt-5.4-mini:
-    input: 0.75
-    output: 4.50
   gpt-5.4:
     input: 2.50
     output: 15.00

@@ -4,7 +4,7 @@ This module is the rollback guardian and is IMMUTABLE infrastructure:
 the evolving agent must never edit it. Responsibilities:
 
 - load configuration from config.yaml
-- snapshot generations into artifacts/gen_N/
+- snapshot each run's generations into artifacts/runs/<run_id>/generations/gen_N/
 - run candidate agents in Docker subprocesses (never imported directly)
 - proxy LLM calls from the sandbox so cost tracking is ground truth
 - smoke-test candidates and gate accept/reject by val split score
@@ -17,6 +17,7 @@ import datetime as _dt
 import json
 import os
 import select
+import shlex
 import shutil
 import subprocess
 import sys
@@ -40,13 +41,27 @@ def load_config(path) -> dict:
 
 # --- snapshot management ----------------------------------------------------
 
-def bootstrap_gen0(config: dict, project_root: Path) -> Path:
-    """Create artifacts/gen_0/ from the live agent/ + tools/ trees if missing.
+def _snapshot_ignore(_dir: str, names: list[str]) -> set[str]:
+    """Skip interpreter/cache artifacts when freezing agent/tool snapshots."""
+    return {
+        name for name in names
+        if name == "__pycache__" or name.endswith((".pyc", ".pyo"))
+    }
+
+
+def bootstrap_gen0(
+    config: dict,
+    project_root: Path,
+    artifacts_root: Optional[Path] = None,
+) -> Path:
+    """Create a gen_0 snapshot from the live agent/ + tools/ trees if missing.
 
     Refuses to bootstrap from an empty/missing source tree to prevent silent
     gen_0 generation from nothing.
     """
-    gen0 = project_root / config["paths"]["artifacts_dir"] / "gen_0"
+    if artifacts_root is None:
+        artifacts_root = project_root / config["paths"]["artifacts_dir"]
+    gen0 = artifacts_root / "gen_0"
     if gen0.exists():
         return gen0
 
@@ -64,15 +79,15 @@ def bootstrap_gen0(config: dict, project_root: Path) -> Path:
 
     gen0.parent.mkdir(parents=True, exist_ok=True)
     gen0.mkdir()
-    shutil.copytree(agent_src, gen0 / "agent")
-    shutil.copytree(tools_src, gen0 / "tools")
+    shutil.copytree(agent_src, gen0 / "agent", ignore=_snapshot_ignore)
+    shutil.copytree(tools_src, gen0 / "tools", ignore=_snapshot_ignore)
     return gen0
 
 
 def copy_snapshot(src_dir: Path, dst_dir: Path) -> None:
     if dst_dir.exists():
         raise FileExistsError(f"snapshot already exists: {dst_dir}")
-    shutil.copytree(src_dir, dst_dir)
+    shutil.copytree(src_dir, dst_dir, ignore=_snapshot_ignore)
 
 
 # --- dataset loading --------------------------------------------------------
@@ -112,11 +127,65 @@ def _serialize_tool_calls(tc_list) -> Optional[list]:
     return out
 
 
+def _tool_call_names(tool_calls: Optional[list]) -> list[str]:
+    if not tool_calls:
+        return []
+    names = []
+    for tc in tool_calls:
+        fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+        name = fn.get("name")
+        names.append(str(name) if name else "?")
+    return names
+
+
+def _summarize_static_scan_result(content) -> str:
+    try:
+        data = json.loads(content) if isinstance(content, str) else content
+    except json.JSONDecodeError:
+        return "static_scan:unparseable"
+    if not isinstance(data, dict):
+        return "static_scan:unparseable"
+    findings = data.get("heuristic_findings") or []
+    external = data.get("external") or {}
+    return (
+        f"static_scan:{data.get('language', '?')}:"
+        f"findings={len(findings)}:ext={external.get('status', '?')}"
+    )
+
+
+def _summarize_tool_results(messages: list) -> list[str]:
+    """Return short, payload-safe summaries of tool outputs in a chat history."""
+    call_names: dict[str, str] = {}
+    summaries = []
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                call_id = tc.get("id")
+                name = (tc.get("function") or {}).get("name")
+                if call_id and name:
+                    call_names[call_id] = name
+        elif msg.get("role") == "tool":
+            tool_call_id = msg.get("tool_call_id")
+            name = call_names.get(tool_call_id, "tool")
+            content = msg.get("content")
+            if name == "static_scan":
+                summaries.append(_summarize_static_scan_result(content))
+            else:
+                summaries.append(f"{name}:chars={len(str(content or ''))}")
+    return summaries[-3:]
+
+
 def make_llm_handler(
     client,
     default_model: str,
     timeout_s: int = 60,
     llm_logger: Optional["LLMCallLogger"] = None,
+    console_logger: Optional[Callable[..., None]] = None,
+    usage_tracker: Optional["LLMUsageTracker"] = None,
 ) -> Callable[[dict], dict]:
     """Return a callable that turns an llm_request envelope into a response.
 
@@ -134,6 +203,7 @@ def make_llm_handler(
         t0 = time.monotonic()
 
         request_dict = {"model": model, "messages": env["messages"]}
+        tool_result_summaries = _summarize_tool_results(env.get("messages", []))
         if env.get("response_format"):
             request_dict["response_format"] = env["response_format"]
         if env.get("tools"):
@@ -189,8 +259,9 @@ def make_llm_handler(
                 "error": error,
             }
 
+        duration_ms = int((time.monotonic() - t0) * 1000)
+
         if llm_logger is not None:
-            duration_ms = int((time.monotonic() - t0) * 1000)
             llm_logger.log(
                 call_id=call_id,
                 timestamp_iso=ts,
@@ -201,6 +272,29 @@ def make_llm_handler(
                 response=response_dict,
                 usage=usage,
                 duration_ms=duration_ms,
+                error=error,
+            )
+
+        if usage_tracker is not None and usage is not None:
+            usage_tracker.add(usage, model=model)
+
+        if console_logger is not None:
+            console_usage = usage or {}
+            console_logger(
+                "llm_call",
+                purpose=env.get("purpose"),
+                task_id=env.get("task_id"),
+                step_in_task=env.get("step_in_task", 0),
+                model=model,
+                duration_ms=duration_ms,
+                prompt_tokens=console_usage.get("prompt_tokens", 0),
+                completion_tokens=console_usage.get("completion_tokens", 0),
+                response_tools=_tool_call_names((response_dict or {}).get("tool_calls")),
+                tool_results=tool_result_summaries,
+                response_kind=(
+                    "tools" if (response_dict or {}).get("tool_calls")
+                    else ("text" if (response_dict or {}).get("content") else "empty")
+                ),
                 error=error,
             )
 
@@ -440,15 +534,85 @@ def _accuracy(per_task: list) -> float:
     return sum(1 for t in per_task if t["predicted"] == t["expected"]) / len(per_task)
 
 
-def _estimate_cost_usd(usage: dict, config: dict) -> float:
-    model = config["model"]["name"]
-    pricing = config.get("pricing", {}).get(model)
+def _pricing_for_model(model: Optional[str], config: dict) -> Optional[dict]:
+    """Return pricing for exact or dated model names, if configured."""
+    if not model:
+        model = config.get("model", {}).get("name")
+    pricing_by_model = config.get("pricing", {})
+    if model in pricing_by_model:
+        return pricing_by_model[model]
+    for configured_model, pricing in sorted(
+        pricing_by_model.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if model and model.startswith(f"{configured_model}-"):
+            return pricing
+    return None
+
+
+def _estimate_cost_usd(usage: dict, config: dict, model: Optional[str] = None) -> float:
+    model = model or usage.get("model") or config.get("model", {}).get("name")
+    pricing = _pricing_for_model(model, config)
     if not pricing:
         return 0.0
     return (
         usage.get("prompt_tokens", 0) * pricing["input"] / 1_000_000
         + usage.get("completion_tokens", 0) * pricing["output"] / 1_000_000
     )
+
+
+class LLMUsageTracker:
+    """Accumulate run-wide billable usage across solve, smoke, and reflection calls."""
+
+    def __init__(self, config: dict):
+        self.config = config
+        self._lock = threading.Lock()
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.n_calls = 0
+        self.cost_usd = 0.0
+        self.by_model: dict[str, dict] = {}
+
+    def add(self, usage: dict, model: Optional[str] = None) -> None:
+        prompt_tokens = int(usage.get("prompt_tokens", 0))
+        completion_tokens = int(usage.get("completion_tokens", 0))
+        usage_model = usage.get("model") or model or self.config.get("model", {}).get("name")
+        cost_usd = _estimate_cost_usd(usage, self.config, model=usage_model)
+        with self._lock:
+            self.prompt_tokens += prompt_tokens
+            self.completion_tokens += completion_tokens
+            self.n_calls += 1
+            self.cost_usd += cost_usd
+            model_bucket = self.by_model.setdefault(
+                usage_model,
+                {"prompt_tokens": 0, "completion_tokens": 0, "n_calls": 0, "cost_usd": 0.0},
+            )
+            model_bucket["prompt_tokens"] += prompt_tokens
+            model_bucket["completion_tokens"] += completion_tokens
+            model_bucket["n_calls"] += 1
+            model_bucket["cost_usd"] += cost_usd
+
+    def tokens(self) -> dict:
+        with self._lock:
+            return {
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "n_calls": self.n_calls,
+            }
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "n_calls": self.n_calls,
+                "cost_usd": self.cost_usd,
+                "by_model": {
+                    model: dict(values)
+                    for model, values in sorted(self.by_model.items())
+                },
+            }
 
 
 def _normalize_label(value):
@@ -518,13 +682,30 @@ def run_candidate(
     re-attaches them on the host side for scoring.
     """
     results = []
-    for task in split:
+    n_tasks = len(split)
+    for idx, task in enumerate(split, start=1):
         task_for_agent = {k: v for k, v in task.items() if k != "label"}
+        if log_event:
+            log_event("task_start", task_idx=idx, n_tasks=n_tasks, task_id=task.get("id"))
         r = run_one_task(gen_dir, task_for_agent, config,
                          llm_handler=llm_handler, log_event=log_event)
         r["expected"] = task.get("label")
         results.append(r)
         if log_event:
+            predicted = _normalize_label(r.get("label"))
+            expected = _normalize_label(r.get("expected"))
+            log_event(
+                "task_result",
+                task_idx=idx,
+                n_tasks=n_tasks,
+                task_id=task.get("id"),
+                predicted=predicted,
+                expected=expected,
+                ok=("error" not in r and predicted is not None and predicted == expected),
+                errored="error" in r,
+                error=r.get("error"),
+                n_llm_calls=(r.get("usage") or {}).get("n_calls", 0),
+            )
             if "error" in r:
                 log_event("error_task", task_id=task.get("id"), error=r["error"])
             elif _normalize_label(r.get("label")) is None:
@@ -565,9 +746,23 @@ def smoke_test(
     return True
 
 
-def validation_gate(parent_macro_f1: float, candidate_macro_f1: float) -> bool:
-    """Strict improvement: candidate must beat parent. Ties don't pass."""
-    return candidate_macro_f1 > parent_macro_f1
+def _score_macro_f1(score_or_f1) -> float:
+    if isinstance(score_or_f1, dict):
+        return float(score_or_f1.get("macro_f1", 0.0))
+    return float(score_or_f1)
+
+
+def _score_errors(score_or_f1) -> int:
+    if isinstance(score_or_f1, dict):
+        return int(score_or_f1.get("n_errors", 0))
+    return 0
+
+
+def validation_gate(parent_score_or_f1, candidate_score_or_f1) -> bool:
+    """Strict improvement with runnable candidates only; ties don't pass."""
+    if _score_errors(candidate_score_or_f1) > 0:
+        return False
+    return _score_macro_f1(candidate_score_or_f1) > _score_macro_f1(parent_score_or_f1)
 
 
 # --- run logging ------------------------------------------------------------
@@ -592,6 +787,229 @@ class RunLogger:
         rec.update(fields)
         with open(self.log_path, "a") as f:
             f.write(json.dumps(rec) + "\n")
+
+
+class EventFanout:
+    """Send structured events to multiple logger-like callables."""
+
+    def __init__(self, *loggers):
+        self.loggers = [logger for logger in loggers if logger is not None]
+
+    def set_gen(self, gen: Optional[int]) -> None:
+        for logger in self.loggers:
+            set_gen = getattr(logger, "set_gen", None)
+            if set_gen is not None:
+                set_gen(gen)
+
+    def __call__(self, event: str, **fields) -> None:
+        for logger in self.loggers:
+            logger(event, **fields)
+
+    def close(self) -> None:
+        for logger in self.loggers:
+            close = getattr(logger, "close", None)
+            if close is not None:
+                close()
+
+
+class ConsoleLogger:
+    """Human-readable stderr progress logger for long experiment runs."""
+
+    def __init__(self, stream=None, *, enabled: bool = True, verbose: bool = False):
+        self.stream = stream if stream is not None else sys.stderr
+        self.enabled = enabled
+        self.verbose = verbose
+        self._gen: Optional[int] = None
+
+    def set_gen(self, gen: Optional[int]) -> None:
+        self._gen = gen
+
+    def __call__(self, event: str, **fields) -> None:
+        if not self.enabled:
+            return
+        line = self._format(event, fields)
+        if not line:
+            return
+        ts = _dt.datetime.now().strftime("%H:%M:%S")
+        print(f"[stem {ts}] {line}", file=self.stream, flush=True)
+
+    def _format(self, event: str, fields: dict) -> Optional[str]:
+        gen = fields.get("gen", self._gen)
+        prefix = f"gen={gen} " if gen is not None else ""
+
+        if event == "start_run":
+            return f"run start id={fields.get('run_id')} config={fields.get('config_path')}"
+        if event == "transcript_start":
+            return (
+                f"terminal transcript path={fields.get('path')} "
+                f"command={fields.get('command')}"
+            )
+        if event == "bootstrap_gen0":
+            return f"{prefix}bootstrap gen_0 dir={fields.get('gen_dir')}"
+        if event == "benchmark_start":
+            limit = fields.get("limit")
+            limit_str = f" limit={limit}" if limit is not None else ""
+            return f"benchmark start gen={fields.get('gen')} split={fields.get('split')}{limit_str}"
+        if event == "eval_start":
+            limit = fields.get("limit")
+            limit_str = f" limit={limit}" if limit is not None else ""
+            return f"{prefix}eval start split={fields.get('split')} tasks={fields.get('n_tasks', '?')}{limit_str}"
+        if event == "start_generation":
+            return (
+                f"{prefix}generation start parent_f1={_fmt_float(fields.get('parent_macro_f1'))} "
+                f"best_f1={_fmt_float(fields.get('best_macro_f1'))} "
+                f"plateau={fields.get('plateau')} cost={_fmt_usd(fields.get('total_cost'))}"
+            )
+        if event == "trajectories_selected":
+            return (
+                f"{prefix}reflection context failures={fields.get('n_failures')} "
+                f"successes={fields.get('n_successes')} task_ids={fields.get('task_ids')}"
+            )
+        if event == "reflect_start":
+            return f"{prefix}reflection start parent={fields.get('parent_dir')}"
+        if event == "proposal":
+            return (
+                f"{prefix}proposal kind={fields.get('kind')} intent={fields.get('intent')} "
+                f"kinds={fields.get('kinds')} rationale={_short(fields.get('rationale'))}"
+            )
+        if event == "reflect_rationale_unjustified":
+            return (
+                f"{prefix}proposal rationale warning kind={fields.get('kind')} "
+                f"rationale={_short(fields.get('rationale'))}"
+            )
+        if event == "apply_success":
+            return f"{prefix}apply success changed_files={fields.get('n_changed_files')}"
+        if event == "proposal_invalid":
+            return f"{prefix}proposal invalid kind={fields.get('kind')} error={_short(fields.get('error'))}"
+        if event == "proposal_noop":
+            return f"{prefix}proposal noop kind={fields.get('kind')}"
+        if event == "apply_error":
+            return f"{prefix}apply error {_short(fields.get('error'))}"
+        if event == "task_start":
+            return (
+                f"{prefix}task {fields.get('task_idx')}/{fields.get('n_tasks')} "
+                f"start id={fields.get('task_id')}"
+            )
+        if event == "task_result":
+            status = "error" if fields.get("errored") else ("ok" if fields.get("ok") else "wrong")
+            return (
+                f"{prefix}task {fields.get('task_idx')}/{fields.get('n_tasks')} done "
+                f"id={fields.get('task_id')} status={status} pred={fields.get('predicted')} "
+                f"expected={fields.get('expected')} calls={fields.get('n_llm_calls')}"
+            )
+        if event == "task_run" and self.verbose:
+            return (
+                f"{prefix}runner task={fields.get('task_id')} container={fields.get('container')} "
+                f"rc={fields.get('runner_end_rc')} calls={fields.get('n_llm_calls')}"
+            )
+        if event == "task_run_warning":
+            return f"{prefix}runner warning task={fields.get('task_id')} reason={fields.get('reason')}"
+        if event == "llm_call":
+            tool_suffix = _format_llm_tool_suffix(fields)
+            if fields.get("error"):
+                return (
+                    f"llm error purpose={fields.get('purpose')} task={fields.get('task_id')} "
+                    f"step={fields.get('step_in_task')} model={fields.get('model')} "
+                    f"duration={_fmt_ms(fields.get('duration_ms'))}{tool_suffix} "
+                    f"error={_short(fields.get('error'))}"
+                )
+            return (
+                f"llm purpose={fields.get('purpose')} task={fields.get('task_id')} "
+                f"step={fields.get('step_in_task')} model={fields.get('model')} "
+                f"duration={_fmt_ms(fields.get('duration_ms'))} "
+                f"tokens={fields.get('prompt_tokens', 0)}+{fields.get('completion_tokens', 0)}"
+                f"{tool_suffix}"
+            )
+        if event == "smoke_pass":
+            return f"{prefix}smoke pass task={fields.get('task_id')}"
+        if event == "smoke_fail":
+            return f"{prefix}smoke fail task={fields.get('task_id')} error={_short(fields.get('error'))}"
+        if event == "eval_complete" or event == "benchmark_complete":
+            return (
+                f"{prefix}eval done split={fields.get('split')} "
+                f"macro_f1={_fmt_float(fields.get('macro_f1'))} "
+                f"accuracy={_fmt_float(fields.get('accuracy'))} "
+                f"errors={fields.get('n_errors')} cost={_fmt_usd(fields.get('cost_usd'))} "
+                f"calls={(fields.get('tokens') or {}).get('n_calls', '?')}"
+            )
+        if event == "gate_accept":
+            return (
+                f"{prefix}gate accept parent_f1={_fmt_float(fields.get('parent_f1'))} "
+                f"candidate_f1={_fmt_float(fields.get('candidate_f1'))}"
+            )
+        if event == "gate_reject":
+            return (
+                f"{prefix}gate reject stage={fields.get('stage')} "
+                f"parent_f1={_fmt_float(fields.get('parent_f1'))} "
+                f"candidate_f1={_fmt_float(fields.get('candidate_f1'))}"
+            )
+        if event == "agent_halt":
+            return f"{prefix}agent halt stage={fields.get('stage')} rationale={_short(fields.get('rationale'))}"
+        if event == "stop":
+            return f"{prefix}stop reason={fields.get('reason')} after={fields.get('after')}"
+        if event == "end_run":
+            return (
+                f"{prefix}run end reason={fields.get('stop_reason')} "
+                f"parent_f1={_fmt_float(fields.get('parent_macro_f1'))} "
+                f"best_f1={_fmt_float(fields.get('best_macro_f1'))} "
+                f"cost={_fmt_usd(fields.get('total_cost_usd'))} "
+                f"calls={(fields.get('total_tokens') or {}).get('n_calls', '?')}"
+            )
+        if event in ("fatal_error", "reflect_error", "reflect_parse_error", "reflect_no_proposal"):
+            return f"{prefix}{event} {_short(fields.get('error') or fields)}"
+        if self.verbose:
+            return f"{prefix}{event} {fields}"
+        return None
+
+
+class TranscriptLogger(ConsoleLogger):
+    """Human-readable progress log written to terminal_output.out in a run dir."""
+
+    def __init__(self, run_dir: Path, *, verbose: bool = False):
+        self.path = run_dir / "terminal_output.out"
+        self._file = open(self.path, "a", buffering=1)
+        super().__init__(stream=self._file, enabled=True, verbose=verbose)
+
+    def close(self) -> None:
+        self._file.close()
+
+
+def _format_llm_tool_suffix(fields: dict) -> str:
+    parts = []
+    tool_results = fields.get("tool_results") or []
+    if tool_results:
+        parts.append("tool_results=" + ",".join(str(item) for item in tool_results))
+    response_tools = fields.get("response_tools") or []
+    if response_tools:
+        parts.append("response_tools=" + ",".join(str(name) for name in response_tools))
+    elif fields.get("response_kind") in {"text", "empty"}:
+        parts.append(f"response={fields.get('response_kind')}")
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def _fmt_float(value) -> str:
+    return f"{value:.3f}" if isinstance(value, (int, float)) else "?"
+
+
+def _fmt_usd(value) -> str:
+    return f"${value:.4f}" if isinstance(value, (int, float)) else "$?"
+
+
+def _fmt_ms(value) -> str:
+    if not isinstance(value, (int, float)):
+        return "?"
+    if value >= 1000:
+        return f"{value / 1000:.1f}s"
+    return f"{int(value)}ms"
+
+
+def _short(value, limit: int = 180) -> str:
+    if value is None:
+        return ""
+    text = str(value).replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit - 3] + "..."
 
 
 # --- LLM call logger --------------------------------------------------------
@@ -760,6 +1178,10 @@ def _new_run_dir(config: dict, project_root: Path) -> tuple:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stem Agent orchestrator")
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--quiet", action="store_true",
+                        help="disable human-readable terminal progress logs")
+    parser.add_argument("--verbose", action="store_true",
+                        help="include lower-level runner/event details in terminal logs")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent
@@ -776,10 +1198,19 @@ def main() -> None:
         pass
 
     run_id, run_dir = _new_run_dir(config, project_root)
+    gen_root = run_dir / "generations"
     shutil.copy(config_path, run_dir / "config.snapshot.yaml")
 
-    log = RunLogger(run_dir)
+    run_log = RunLogger(run_dir)
+    console_log = ConsoleLogger(enabled=not args.quiet, verbose=args.verbose)
+    transcript_log = TranscriptLogger(run_dir, verbose=args.verbose)
+    progress_log = EventFanout(console_log, transcript_log)
+    log = EventFanout(run_log, progress_log)
     llm_log = LLMCallLogger(run_dir)
+    usage_tracker = LLMUsageTracker(config)
+    log("transcript_start",
+        path=str(transcript_log.path),
+        command=shlex.join([sys.executable, *sys.argv]))
     log("start_run", run_id=run_id, config_path=str(config_path))
 
     try:
@@ -787,33 +1218,54 @@ def main() -> None:
         client = OpenAI()
     except Exception as e:
         log("fatal_error", error=f"OpenAI client init failed: {e}")
+        transcript_log.close()
         sys.exit(1)
 
     try:
         log.set_gen(0)
         llm_log.set_gen(0)
-        handler = make_llm_handler(client, config["model"]["name"], llm_logger=llm_log)
-        gen0 = bootstrap_gen0(config, project_root)
+        handler = make_llm_handler(
+            client,
+            config["model"]["name"],
+            llm_logger=llm_log,
+            console_logger=progress_log,
+            usage_tracker=usage_tracker,
+        )
+        gen0 = bootstrap_gen0(config, project_root, artifacts_root=gen_root)
         log("bootstrap_gen0", gen_dir=str(gen0))
 
+        train_split = _load_split(config, project_root, "train")
         val_split = _load_split(config, project_root, "val")
+        log("eval_start", split="train", n_tasks=len(train_split))
+        gen0_train_score = run_candidate(
+            gen0, train_split, config, llm_handler=handler, log_event=log
+        )
+        log("eval_complete", split="train",
+            macro_f1=gen0_train_score["macro_f1"],
+            accuracy=gen0_train_score["accuracy"],
+            n_errors=gen0_train_score["n_errors"],
+            cost_usd=gen0_train_score["cost_usd"],
+            tokens=gen0_train_score["usage"])
+
         log("eval_start", split="val", n_tasks=len(val_split))
-        gen0_score = run_candidate(gen0, val_split, config, llm_handler=handler, log_event=log)
+        gen0_val_score = run_candidate(
+            gen0, val_split, config, llm_handler=handler, log_event=log
+        )
         log("eval_complete", split="val",
-            macro_f1=gen0_score["macro_f1"],
-            accuracy=gen0_score["accuracy"],
-            n_errors=gen0_score["n_errors"],
-            cost_usd=gen0_score["cost_usd"],
-            tokens=gen0_score["usage"])
+            macro_f1=gen0_val_score["macro_f1"],
+            accuracy=gen0_val_score["accuracy"],
+            n_errors=gen0_val_score["n_errors"],
+            cost_usd=gen0_val_score["cost_usd"],
+            tokens=gen0_val_score["usage"])
 
         parent_dir = gen0
-        parent_score = gen0_score
-        parent_macro_f1 = gen0_score["macro_f1"]
-        best_macro_f1 = parent_macro_f1
+        parent_train_score = gen0_train_score
+        parent_val_score = gen0_val_score
+        parent_train_macro_f1 = gen0_train_score["macro_f1"]
+        parent_val_macro_f1 = gen0_val_score["macro_f1"]
+        best_macro_f1 = parent_val_macro_f1
         plateau = 0
-        total_cost = gen0_score["cost_usd"]
-        total_tokens = dict(gen0_score["usage"])
-        task_code_map = {t.get("id"): t.get("code", "") for t in val_split}
+        train_task_code_map = {t.get("id"): t.get("code", "") for t in train_split}
         plateau_limit = config["stopping"]["plateau_generations"]
 
         from growth.reflect import reflect
@@ -834,17 +1286,18 @@ def main() -> None:
             log.set_gen(gen_idx)
             llm_log.set_gen(gen_idx)
             log("start_generation",
-                parent_macro_f1=parent_macro_f1,
+                parent_macro_f1=parent_val_macro_f1,
+                parent_train_macro_f1=parent_train_macro_f1,
                 best_macro_f1=best_macro_f1,
                 plateau=plateau,
-                total_cost=total_cost)
+                total_cost=usage_tracker.cost_usd)
 
-            candidate_dir = project_root / config["paths"]["artifacts_dir"] / f"gen_{gen_idx}"
+            candidate_dir = gen_root / f"gen_{gen_idx}"
             copy_snapshot(parent_dir, candidate_dir)
             log("snapshot_copied", src=str(parent_dir), dst=str(candidate_dir))
 
             trajectories = _select_trajectories(
-                parent_score.get("per_task", []), task_code_map,
+                parent_train_score.get("per_task", []), train_task_code_map,
             )
             log("trajectories_selected",
                 n_failures=sum(1 for t in trajectories
@@ -858,10 +1311,12 @@ def main() -> None:
             llm_log.set_gen(None)
             proposal = None
             try:
+                log("reflect_start", parent_dir=str(parent_dir), n_trajectories=len(trajectories))
                 proposal = reflect(
                     trajectories, str(parent_dir),
                     llm_handler=handler, config=config,
-                    score=parent_score, gen_idx=gen_idx - 1,
+                    score=parent_train_score, gen_idx=gen_idx - 1,
+                    score_split="train",
                 )
             except ValueError as e:
                 log("reflect_parse_error", error=str(e))
@@ -921,6 +1376,17 @@ def main() -> None:
 
             halt_requested = proposal_intent == "halt"
             after_files = _read_mutable_files(candidate_dir)
+            changed_files = sorted(
+                set(before_files.keys()) ^ set(after_files.keys())
+                | {k for k in before_files.keys() & after_files.keys()
+                   if before_files[k] != after_files[k]}
+            )
+            log("apply_success",
+                kind=proposal_kind,
+                kinds=proposal_kinds,
+                intent=proposal_intent,
+                n_changed_files=len(changed_files),
+                changed_files=changed_files[:20])
             if before_files == after_files and not halt_requested:
                 log("proposal_noop", kind=proposal_kind, kinds=proposal_kinds)
                 shutil.rmtree(candidate_dir)
@@ -934,7 +1400,7 @@ def main() -> None:
                     rationale=proposal_rationale[:300],
                     kinds=proposal_kinds)
 
-            if not smoke_test(candidate_dir, config, task=val_split[0],
+            if not smoke_test(candidate_dir, config, task=train_split[0],
                               llm_handler=handler, log_event=log):
                 log("gate_reject", stage="smoke")
                 shutil.rmtree(candidate_dir)
@@ -946,37 +1412,45 @@ def main() -> None:
                     break
                 continue
 
-            cand_score = run_candidate(candidate_dir, val_split, config,
-                                       llm_handler=handler, log_event=log)
-            total_cost += cand_score["cost_usd"]
-            total_tokens["prompt_tokens"] += cand_score["usage"]["prompt_tokens"]
-            total_tokens["completion_tokens"] += cand_score["usage"]["completion_tokens"]
-            total_tokens["n_calls"] += cand_score["usage"]["n_calls"]
+            cand_val_score = run_candidate(candidate_dir, val_split, config,
+                                           llm_handler=handler, log_event=log)
             log("eval_complete", split="val",
-                macro_f1=cand_score["macro_f1"],
-                accuracy=cand_score["accuracy"],
-                n_errors=cand_score["n_errors"],
-                cost_usd=cand_score["cost_usd"],
-                tokens=cand_score["usage"])
+                macro_f1=cand_val_score["macro_f1"],
+                accuracy=cand_val_score["accuracy"],
+                n_errors=cand_val_score["n_errors"],
+                cost_usd=cand_val_score["cost_usd"],
+                tokens=cand_val_score["usage"])
 
             accepted = False
-            if validation_gate(parent_macro_f1, cand_score["macro_f1"]):
+            if validation_gate(parent_val_score, cand_val_score):
                 log("gate_accept",
-                    parent_f1=parent_macro_f1,
-                    candidate_f1=cand_score["macro_f1"])
+                    parent_f1=parent_val_macro_f1,
+                    candidate_f1=cand_val_score["macro_f1"])
                 accepted = True
+                cand_train_score = run_candidate(candidate_dir, train_split, config,
+                                                 llm_handler=handler, log_event=log)
+                log("eval_complete", split="train",
+                    macro_f1=cand_train_score["macro_f1"],
+                    accuracy=cand_train_score["accuracy"],
+                    n_errors=cand_train_score["n_errors"],
+                    cost_usd=cand_train_score["cost_usd"],
+                    tokens=cand_train_score["usage"])
                 parent_dir = candidate_dir
-                parent_score = cand_score
-                parent_macro_f1 = cand_score["macro_f1"]
-                if cand_score["macro_f1"] > best_macro_f1:
-                    best_macro_f1 = cand_score["macro_f1"]
+                parent_train_score = cand_train_score
+                parent_val_score = cand_val_score
+                parent_train_macro_f1 = cand_train_score["macro_f1"]
+                parent_val_macro_f1 = cand_val_score["macro_f1"]
+                if cand_val_score["macro_f1"] > best_macro_f1:
+                    best_macro_f1 = cand_val_score["macro_f1"]
                     plateau = 0
                 else:
                     plateau += 1
             else:
-                log("gate_reject", stage="val",
-                    parent_f1=parent_macro_f1,
-                    candidate_f1=cand_score["macro_f1"])
+                reject_stage = "val_errors" if cand_val_score["n_errors"] > 0 else "val"
+                log("gate_reject", stage=reject_stage,
+                    parent_f1=parent_val_macro_f1,
+                    candidate_f1=cand_val_score["macro_f1"],
+                    candidate_errors=cand_val_score["n_errors"])
                 plateau += 1
 
             if halt_requested:
@@ -984,27 +1458,31 @@ def main() -> None:
                 log("stop",
                     reason=stop_reason,
                     accepted=accepted,
-                    parent_f1=parent_macro_f1,
-                    candidate_f1=cand_score["macro_f1"])
+                    parent_f1=parent_val_macro_f1,
+                    candidate_f1=cand_val_score["macro_f1"])
                 break
 
             if plateau >= plateau_limit:
                 stop_reason = "plateau"
-                log("stop", reason=stop_reason, plateau=plateau)
+                log("stop", reason=stop_reason, plateau=plateau, after="val_gate")
                 break
 
         log("end_run",
             stop_reason=stop_reason,
-            parent_macro_f1=parent_macro_f1,
+            parent_macro_f1=parent_val_macro_f1,
+            parent_train_macro_f1=parent_train_macro_f1,
             best_macro_f1=best_macro_f1,
-            total_cost_usd=total_cost,
-            total_tokens=total_tokens)
+            total_cost_usd=usage_tracker.cost_usd,
+            total_tokens=usage_tracker.tokens(),
+            llm_usage=usage_tracker.snapshot())
 
     except Exception as e:
         log("fatal_error",
             error=f"{e.__class__.__name__}: {e}",
             traceback=traceback.format_exc())
         sys.exit(1)
+    finally:
+        transcript_log.close()
 
 
 if __name__ == "__main__":

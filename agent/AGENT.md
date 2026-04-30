@@ -2,9 +2,10 @@
 
 This directory's code (`agent.py`, `prompt.txt`, plus anything future
 generations add) IS what evolves across generations. The orchestrator
-copies this tree into `artifacts/gen_N/` at the start of each generation;
-edits made here become part of gen_0. Edits made by the agent at runtime
-go into `artifacts/gen_N+1/agent/` via `growth/apply.py`.
+copies this tree into `artifacts/runs/<run_id>/generations/gen_N/` at the
+start of each generation; edits made here become part of gen_0. Edits made
+by the agent at runtime go into
+`artifacts/runs/<run_id>/generations/gen_N+1/agent/` via `growth/apply.py`.
 
 ## Hard rules for agent code
 

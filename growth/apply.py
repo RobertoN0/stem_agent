@@ -32,6 +32,7 @@ _PROTECTED_TOOLS = frozenset([
     "write_file",
     "list_dir",
     "run_bash",
+    "static_scan",
     "note",
 ])
 
