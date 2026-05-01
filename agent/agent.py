@@ -10,7 +10,7 @@ import json
 import re
 from pathlib import Path
 
-from tools.base import llm_call, read_file, list_dir, run_bash, static_scan, note
+from tools.base import llm_call, read_file, list_dir, static_scan, note
 
 
 _PROMPT_PATH = Path(__file__).parent / "prompt.txt"
@@ -148,8 +148,6 @@ def _dispatch(name: str, args: dict, task_code: str = ""):
             return list_dir(args["path"])
         except Exception as e:
             return f"error: {e}"
-    elif name == "run_bash":
-        return run_bash(args.get("cmd", ""), timeout=args.get("timeout", 30))
     elif name == "static_scan":
         return static_scan(
             task_code,

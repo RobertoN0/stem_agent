@@ -10,9 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
-
-import orchestrator
 from orchestrator import LLMCallLogger, make_llm_handler
 from eval.inspect_llm_calls import iter_calls, summarize
 

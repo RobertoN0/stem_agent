@@ -15,9 +15,6 @@ import json
 import sys
 from pathlib import Path
 
-import yaml
-
-
 def run_benchmark(
     gen_dir: str,
     split_name: str,

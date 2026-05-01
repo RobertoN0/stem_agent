@@ -205,50 +205,6 @@ def _repo_tree_summary(project_root: Path, manifest: dict) -> str:
     return "\n".join(paths) if paths else "(no repo files visible)"
 
 
-def _repo_context(project_root: Path, manifest: dict) -> str:
-    ctx = reflection_context_config(manifest)
-    max_chars = int(ctx.get("max_file_chars", 4000))
-    deny = ctx.get("deny_paths") or []
-    blocks = [f"── repo tree (filtered) ──\n{_repo_tree_summary(project_root, manifest)}"]
-    for item in ctx.get("files") or []:
-        rel = item.get("path")
-        mode = item.get("mode", "excerpt")
-        if not isinstance(rel, str):
-            continue
-        if _context_denied(rel, deny):
-            continue
-        path = project_root / rel
-        if not path.exists() or not path.is_file():
-            continue
-        if mode == "api" and path.suffix == ".py":
-            body = _python_api_summary(path, max_chars=max_chars)
-        else:
-            body = path.read_text()[:max_chars]
-        blocks.append(f"── {rel} ({mode}) ──\n{body}")
-    return "\n\n".join(blocks)
-
-
-def _mutable_snapshot_context(gen_dir: Path, manifest: dict) -> str:
-    ctx = reflection_context_config(manifest)
-    max_chars = int(ctx.get("max_snapshot_file_chars", 12000))
-    blocks = []
-    for root_name in snapshot_roots(manifest):
-        root = gen_dir / root_name
-        if not root.exists():
-            continue
-        for p in sorted(root.rglob("*")):
-            if not p.is_file() or p.name.endswith((".pyc", ".pyo")):
-                continue
-            rel = p.relative_to(gen_dir).as_posix()
-            try:
-                content = p.read_text()
-            except UnicodeDecodeError:
-                content = "(binary file omitted)"
-            truncated = "\n...[truncated]..." if len(content) > max_chars else ""
-            blocks.append(f"── {rel} ──\n{content[:max_chars]}{truncated}")
-    return "\n\n".join(blocks) if blocks else "(no mutable snapshot files found)"
-
-
 def _compute_confusion(per_task: list) -> dict:
     """Counts and class-wise metrics. Errors hurt the true class's recall."""
     by_exp = {
@@ -986,22 +942,6 @@ def _gateway_turn(
         "content": resp.get("content"),
         "tool_calls": resp.get("tool_calls"),
     }
-
-
-def _gateway_call(llm_handler, messages: list, model: str) -> Optional[str]:
-    """Compatibility helper for one JSON-object reflection call."""
-    resp = _gateway_turn(
-        llm_handler,
-        messages,
-        model,
-        response_format={"type": "json_object"},
-    )
-    if resp is None:
-        return None
-    content = resp.get("content")
-    if not isinstance(content, str) or not content.strip():
-        return None
-    return content
 
 
 def _parse_proposal(content: str) -> dict:

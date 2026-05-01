@@ -15,7 +15,6 @@ the evolving agent must never edit it. Responsibilities:
 import argparse
 import datetime as _dt
 import json
-import os
 import select
 import shlex
 import shutil
