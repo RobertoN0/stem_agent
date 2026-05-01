@@ -15,6 +15,8 @@ from growth.reflect import (
     reflect,
     _compute_confusion,
     _extract_tools_api,
+    _list_repo_files,
+    _read_repo_file,
     _build_messages,
     _parse_proposal,
 )
@@ -44,6 +46,8 @@ def gen_dir(tmp_path: Path) -> Path:
     )
     (tmp_path / "knowledge").mkdir()
     (tmp_path / "knowledge" / "strategy.md").write_text("# Learned Strategy\n")
+    (tmp_path / "self_model").mkdir()
+    (tmp_path / "self_model" / "architecture.md").write_text("# Architecture\n")
     return tmp_path
 
 
@@ -359,6 +363,16 @@ def test_create_file_allows_knowledge_under_manifest(gen_dir, phase2_manifest):
     assert (gen_dir / "knowledge" / "notes.md").read_text() == "learned later\n"
 
 
+def test_create_file_allows_self_model_under_manifest(gen_dir, phase2_manifest):
+    apply_proposal(
+        {"kind": "create_file",
+         "details": {"path": "self_model/new_signal.md", "content": "observe tools\n"}},
+        str(gen_dir),
+        manifest=phase2_manifest,
+    )
+    assert (gen_dir / "self_model" / "new_signal.md").read_text() == "observe tools\n"
+
+
 def test_create_file_rejects_kernel_and_data_paths(gen_dir, phase2_manifest):
     for path in ("orchestrator.py", "data/leak.txt", "artifacts/run.txt"):
         with pytest.raises(ValueError, match="not mutable"):
@@ -404,6 +418,16 @@ def test_replace_file_updates_knowledge_under_manifest(gen_dir, phase2_manifest)
         manifest=phase2_manifest,
     )
     assert (gen_dir / "knowledge" / "strategy.md").read_text() == "prefer evidence\n"
+
+
+def test_replace_file_updates_self_model_under_manifest(gen_dir, phase2_manifest):
+    apply_proposal(
+        {"kind": "replace_file",
+         "details": {"path": "self_model/architecture.md", "content": "agent sees /agent\n"}},
+        str(gen_dir),
+        manifest=phase2_manifest,
+    )
+    assert (gen_dir / "self_model" / "architecture.md").read_text() == "agent sees /agent\n"
 
 
 def test_replace_file_rejects_tools_base_whole_file(gen_dir, phase2_manifest):
@@ -472,6 +496,38 @@ def test_manifest_helpers_preserve_dotfile_paths():
     assert matches_any(".codex/config", deny)
     assert matches_any(".git/config", deny)
     assert matches_any(".venv/bin/python", deny)
+
+
+def test_reflection_repo_file_tools_allow_kernel_context_and_deny_leaks(tmp_path):
+    project_root = tmp_path
+    (project_root / "growth").mkdir()
+    (project_root / "growth" / "apply.py").write_text("def apply_proposal():\n    pass\n")
+    (project_root / "data").mkdir()
+    (project_root / "data" / "labels.jsonl").write_text('{"label": "vulnerable"}\n')
+    (project_root / "artifacts").mkdir()
+    (project_root / "artifacts" / "run.txt").write_text("raw run\n")
+    (project_root / "agent").mkdir()
+    (project_root / "agent" / "agent.py").write_text("def solve_task(task):\n    pass\n")
+    (project_root / "README.md").write_text("# Project\n")
+
+    manifest = load_mutation_manifest(Path(__file__).resolve().parent.parent)
+    listed = _list_repo_files(project_root, manifest)
+
+    paths = {item["path"] for item in listed["files"]}
+    assert "growth/apply.py" in paths
+    assert "README.md" in paths
+    assert "data/labels.jsonl" not in paths
+    assert "artifacts/run.txt" not in paths
+
+    allowed = _read_repo_file(project_root, manifest, "growth/apply.py")
+    assert allowed["path"] == "growth/apply.py"
+    assert "def apply_proposal" in allowed["content"]
+
+    denied_data = _read_repo_file(project_root, manifest, "data/labels.jsonl")
+    assert "denied" in denied_data["error"]
+
+    mutable = _read_repo_file(project_root, manifest, "agent/agent.py")
+    assert "read_mutable_file" in mutable["error"]
 
 
 # --- reflect.py: helpers ---------------------------------------------------
@@ -564,6 +620,9 @@ def test_build_messages_includes_balanced_case_index_and_tool_guidance(gen_dir):
     assert "FAILURE 1" in user
     assert "read_train_case" in user
     assert "read_mutable_file" in user
+    assert "list_repo_files" in user
+    assert "read_repo_file" in user
+    assert "Before calling propose_changes" in user
     assert "propose_changes" in user
     assert "edit_prompt" in user
     assert "edit_solve_loop" in user
@@ -573,6 +632,8 @@ def test_build_messages_includes_balanced_case_index_and_tool_guidance(gen_dir):
     assert "replace_file" in user
     assert "add_function" in user
     assert "replace_function" in user
+    assert "self_model/" in user
+    assert "self_model/experiments.md" in user
     assert "\"intent\": \"iterate\"" in user
     assert "\"changes\"" in user
     assert "TRAIN-ONLY SELF-OBSERVATION" in user
@@ -608,16 +669,34 @@ def _tool_call(name: str, args: dict, call_id: str = "call_1") -> dict:
 
 
 def _fake_reflection_tool_handler(proposal: dict, calls: list | None = None):
+    state = {"n": 0}
+
     def handler(env):
+        state["n"] += 1
         if calls is not None:
             calls.append(env)
-        if len(calls or []) == 1:
+        if state["n"] == 1:
             return {
                 "_kind": "llm_response",
                 "id": env["id"],
                 "ok": True,
                 "content": None,
                 "tool_calls": [_tool_call("list_mutable_files", {}, "inspect_1")],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+        if state["n"] == 2:
+            return {
+                "_kind": "llm_response",
+                "id": env["id"],
+                "ok": True,
+                "content": None,
+                "tool_calls": [
+                    _tool_call(
+                        "read_mutable_file",
+                        {"path": "self_model/architecture.md"},
+                        "self_1",
+                    )
+                ],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5},
             }
         return {
@@ -668,9 +747,83 @@ def test_reflect_returns_parsed_proposal(gen_dir):
     assert calls[0]["response_format"] is None
     assert {t["function"]["name"] for t in calls[0]["tools"]} >= {
         "list_mutable_files", "read_mutable_file", "read_train_case",
-        "read_repo_context", "read_tool_api", "propose_changes",
+        "read_repo_context", "list_repo_files", "read_repo_file",
+        "read_tool_api", "propose_changes",
     }
     assert any(m["role"] == "tool" for m in calls[1]["messages"])
+
+
+def test_reflect_requires_self_model_or_repo_context_before_tool_proposal(gen_dir):
+    proposal = {
+        "rationale": "task t1 showed prompt confusion",
+        "intent": "iterate",
+        "changes": [
+            {"kind": "edit_prompt", "details": {"content": "new prompt"}},
+        ],
+    }
+    calls = []
+    state = {"n": 0}
+
+    def handler(env):
+        state["n"] += 1
+        calls.append(env)
+        if state["n"] == 1:
+            return {
+                "_kind": "llm_response",
+                "id": env["id"],
+                "ok": True,
+                "content": None,
+                "tool_calls": [_tool_call("list_mutable_files", {}, "inspect_1")],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+        if state["n"] == 2:
+            return {
+                "_kind": "llm_response",
+                "id": env["id"],
+                "ok": True,
+                "content": None,
+                "tool_calls": [_tool_call("propose_changes", proposal, "too_early")],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+        if state["n"] == 3:
+            return {
+                "_kind": "llm_response",
+                "id": env["id"],
+                "ok": True,
+                "content": None,
+                "tool_calls": [
+                    _tool_call(
+                        "read_mutable_file",
+                        {"path": "self_model/failure_modes.md"},
+                        "self_1",
+                    )
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+        return {
+            "_kind": "llm_response",
+            "id": env["id"],
+            "ok": True,
+            "content": None,
+            "tool_calls": [_tool_call("propose_changes", proposal, "proposal_1")],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+
+    out = reflect(
+        trajectories=[],
+        current_gen_dir=str(gen_dir),
+        llm_handler=handler,
+        config={"model": {"name": "gpt-5.4-mini"}},
+        score={"per_task": [], "macro_f1": 0.0, "accuracy": 0.0, "n_tasks": 0},
+        gen_idx=0,
+    )
+
+    assert out["changes"][0]["kind"] == "edit_prompt"
+    early_messages = calls[2]["messages"]
+    assert any(
+        message.get("role") == "tool" and "self_model" in message.get("content", "")
+        for message in early_messages
+    )
 
 
 def test_reflect_returns_none_when_handler_fails(gen_dir):
@@ -753,6 +906,8 @@ def test_parse_proposal_accepts_new_file_and_function_kinds():
         "changes": [
             {"kind": "replace_file",
              "details": {"path": "knowledge/strategy.md", "content": "x"}},
+            {"kind": "replace_file",
+             "details": {"path": "self_model/failure_modes.md", "content": "x"}},
             {"kind": "add_function",
              "details": {"path": "agent/helpers.py", "name": "h", "code": "def h(): pass"}},
             {"kind": "replace_function",
@@ -760,7 +915,7 @@ def test_parse_proposal_accepts_new_file_and_function_kinds():
         ],
     }))
     assert [c["kind"] for c in out["changes"]] == [
-        "replace_file", "add_function", "replace_function",
+        "replace_file", "replace_file", "add_function", "replace_function",
     ]
 
 

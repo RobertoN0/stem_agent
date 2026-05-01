@@ -6,6 +6,7 @@ snapshot_roots:
   - agent
   - tools
   - knowledge
+  - self_model
 
 # Candidate proposals may only create, replace, or delete paths matching these
 # globs. Kernel paths stay outside the generation snapshot.
@@ -13,6 +14,7 @@ mutable_paths:
   - agent/**
   - tools/**
   - knowledge/**
+  - self_model/**
 
 # These files may be replaced, but not deleted.
 protected_files:

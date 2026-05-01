@@ -20,6 +20,7 @@ from typing import Optional
 from growth.manifest import (
     load_mutation_manifest,
     matches_any,
+    normalize_rel_path,
     reflection_context_config,
     snapshot_roots,
 )
@@ -132,20 +133,75 @@ def _context_denied(rel_path: str, deny_patterns: list[str]) -> bool:
     return matches_any(rel_path, deny_patterns)
 
 
-def _repo_tree_summary(project_root: Path, manifest: dict) -> str:
+def _under_snapshot_root(rel_path: str, manifest: dict) -> bool:
+    return any(
+        rel_path == root or rel_path.startswith(root + "/")
+        for root in snapshot_roots(manifest)
+    )
+
+
+def _safe_repo_context_rel(
+    project_root: Path,
+    manifest: dict,
+    rel_path: str,
+) -> tuple[str, Path]:
+    """Validate a read-only repo context path without using mutable roots."""
+    ctx = reflection_context_config(manifest)
+    deny = ctx.get("deny_paths") or []
+    rel = normalize_rel_path(rel_path.strip() if isinstance(rel_path, str) else rel_path)
+    if _context_denied(rel, deny):
+        raise ValueError(f"path is denied: {rel}")
+    if _under_snapshot_root(rel, manifest):
+        raise ValueError(
+            f"path is a mutable snapshot file; use read_mutable_file for {rel}"
+        )
+
+    root = project_root.resolve()
+    path = (project_root / rel).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as e:
+        raise ValueError(f"path escapes project root: {rel}") from e
+    if path.is_symlink():
+        raise ValueError(f"symlink paths are not readable reflection context: {rel}")
+    return rel, path
+
+
+def _list_repo_files(project_root: Path, manifest: dict, prefix: str = "") -> dict:
     ctx = reflection_context_config(manifest)
     deny = ctx.get("deny_paths") or []
     max_files = int(ctx.get("max_tree_files", 120))
-    paths = []
+    prefix = (prefix or "").strip().strip("/")
+    if prefix:
+        try:
+            prefix = normalize_rel_path(prefix)
+        except ValueError as e:
+            return {"error": str(e), "files": []}
+        if _context_denied(prefix, deny):
+            return {"error": f"prefix is denied: {prefix}", "files": []}
+
+    files = []
+    truncated = False
     for p in sorted(project_root.rglob("*")):
-        if not p.is_file():
+        if not p.is_file() or p.is_symlink():
             continue
         rel = p.relative_to(project_root).as_posix()
+        if prefix and not (rel == prefix or rel.startswith(prefix + "/")):
+            continue
         if _context_denied(rel, deny):
             continue
-        paths.append(rel)
-        if len(paths) >= max_files:
+        files.append({"path": rel, "bytes": p.stat().st_size})
+        if len(files) >= max_files:
+            truncated = True
             break
+    return {"files": files, "truncated": truncated}
+
+
+def _repo_tree_summary(project_root: Path, manifest: dict) -> str:
+    listed = _list_repo_files(project_root, manifest)
+    if listed.get("error"):
+        return f"(repo tree unavailable: {listed['error']})"
+    paths = [item["path"] for item in listed.get("files") or []]
     return "\n".join(paths) if paths else "(no repo files visible)"
 
 
@@ -353,6 +409,7 @@ def _format_self_observation(self_observation: Optional[dict]) -> str:
             f"runtime_static_scan={solve.get('tasks_with_runtime_static_scan', 0)}, "
             f"direct_static_scan={solve.get('tasks_with_direct_static_scan', 0)}, "
             f"read_file={solve.get('tasks_with_read_file', 0)}, "
+            f"list_dir={solve.get('tasks_with_list_dir', 0)}, "
             f"note={solve.get('tasks_with_note', 0)}, "
             f"finalize_tool={solve.get('tasks_with_finalize_tool', 0)}, "
             f"text_response={solve.get('tasks_with_text_response', 0)}"
@@ -429,7 +486,10 @@ def _build_messages(
         "7. Never propose edits outside manifest-mutable paths, and never "
         "change protected kernel files or protected symbols.\n\n"
         "Tool rules:\n"
-        "- First inspect at least one train case or mutable file using the tools.\n"
+        "- First inspect at least one train case, mutable file, or repo file using the tools.\n"
+        "- Also inspect at least one self-model file under self_model/** or one "
+        "filtered repo contract file before proposing. This is the architecture "
+        "self-awareness check.\n"
         "- End by calling `propose_changes` exactly once.\n"
         "- Do not output prose as your final answer; final proposals must be tool calls."
     )
@@ -470,10 +530,17 @@ INSPECTION CONTEXT AVAILABLE THROUGH TOOLS
 
 Use the tools to inspect before proposing:
 - list_mutable_files: see the evolving files available in this generation.
-- read_mutable_file: read agent/**, tools/**, or knowledge/** from the generation snapshot.
+- read_mutable_file: read agent/**, tools/**, knowledge/**, or self_model/** from the generation snapshot.
 - read_train_case: read full code and raw output for one shown train task_id.
+- list_repo_files: list bounded, filtered repository paths for architecture self-inspection.
+- read_repo_file: read one filtered immutable repo file. Use read_mutable_file for mutable snapshot files.
 - read_repo_context: read filtered immutable context such as "tree", README/config summaries, or public kernel APIs.
 - read_tool_api: inspect public tools/base.py signatures.
+
+Before calling propose_changes, you must read at least one self-model file
+(for example self_model/architecture.md or self_model/failure_modes.md) or one
+filtered repo contract file. Reading only agent.py, prompt.txt, train cases, or
+tools/base.py signatures is not enough for this final architecture phase.
 
 ══════════════════════════════════════════════════════════════════════
 YOUR PROPOSAL
@@ -498,7 +565,13 @@ Choose among mutable surfaces neutrally:
 - agent/agent.py can change workflow, tool-use policy, or how context is assembled.
 - tools/base.py can gain bounded helper tools or improve mutable helper behavior.
 - knowledge/ can store learned policies or notes when a policy file is the best fit.
+- self_model/ can store architecture, capability, failure-mode, and experiment memory.
 - agent/prompt.txt can change only the generic task framing and output contract.
+
+If you diagnose a durable failure mode, workflow lesson, or experiment outcome,
+prefer a short bundled update to self_model/failure_modes.md or
+self_model/experiments.md alongside the behavior change. Do not add self-model
+text when it would only restate the prompt or memorize individual task labels.
 
 When ready, call `propose_changes` with exactly this top-level shape:
 
@@ -513,6 +586,8 @@ When ready, call `propose_changes` with exactly this top-level shape:
     {{"kind": "delete_tool", "details": {{"name": "<existing_non_core_function_name>"}}}},
     {{"kind": "create_file", "details": {{"path": "agent/x.py", "content": "<new file content>"}}}},
     {{"kind": "replace_file", "details": {{"path": "knowledge/strategy.md", "content": "<complete file content>"}}}},
+    {{"kind": "replace_file", "details": {{"path": "self_model/failure_modes.md", "content": "<complete file content>"}}}},
+    {{"kind": "replace_file", "details": {{"path": "self_model/experiments.md", "content": "<complete file content>"}}}},
     {{"kind": "delete_file", "details": {{"path": "agent/old.py"}}}},
     {{"kind": "add_function", "details": {{"path": "agent/helpers.py", "name": "<function_name>", "code": "<complete Python def block>"}}}},
     {{"kind": "replace_function", "details": {{"path": "tools/base.py", "name": "<existing_function_name>", "code": "<complete replacement Python def block>"}}}}
@@ -553,7 +628,8 @@ Additional constraints:
 - delete_file must not delete protected files: agent/agent.py,
   agent/prompt.txt, tools/base.py.
 - create_file / replace_file / delete_file / add_function / replace_function
-  paths must be relative and manifest-mutable (agent/**, tools/**, knowledge/**).
+  paths must be relative and manifest-mutable (agent/**, tools/**, knowledge/**,
+  self_model/**).
 
 Inspect first, then call propose_changes."""
 
@@ -606,7 +682,8 @@ def _reflection_tool_specs() -> list:
                 "name": "read_mutable_file",
                 "description": (
                     "Read one manifest snapshot file, such as agent/agent.py, "
-                    "agent/prompt.txt, tools/base.py, or knowledge/strategy.md."
+                    "agent/prompt.txt, tools/base.py, knowledge/strategy.md, "
+                    "or self_model/architecture.md."
                 ),
                 "parameters": {
                     "type": "object",
@@ -646,6 +723,47 @@ def _reflection_tool_specs() -> list:
                 "parameters": {
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_repo_files",
+                "description": (
+                    "List bounded, filtered repository files for architecture "
+                    "self-inspection. Data, artifacts, secrets, and local notes "
+                    "are denied."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prefix": {
+                            "type": "string",
+                            "description": "Optional relative directory prefix.",
+                        }
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_repo_file",
+                "description": (
+                    "Read one bounded, filtered repository file outside mutable "
+                    "snapshot roots. Use read_mutable_file for agent/tools/"
+                    "knowledge/self_model files in the current generation."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Relative repo path to read.",
+                        }
+                    },
                     "required": ["path"],
                 },
             },
@@ -750,6 +868,28 @@ def _read_repo_context_path(project_root: Path, manifest: dict, rel_path: str) -
     return {"path": rel_path, "mode": mode, "content": body}
 
 
+def _read_repo_file(project_root: Path, manifest: dict, rel_path: str) -> dict:
+    try:
+        rel, path = _safe_repo_context_rel(project_root, manifest, rel_path)
+    except ValueError as e:
+        return {"error": str(e)}
+    if not path.exists():
+        return {"error": f"not found: {rel}"}
+    if not path.is_file():
+        return {"error": f"not a file: {rel}"}
+
+    max_chars = int(reflection_context_config(manifest).get("max_file_chars", 4000))
+    try:
+        text = path.read_text()
+    except UnicodeDecodeError:
+        return {"path": rel, "content": "(binary file omitted)", "truncated": False}
+    return {
+        "path": rel,
+        "content": text[:max_chars],
+        "truncated": len(text) > max_chars,
+    }
+
+
 def _dispatch_reflection_tool(
     name: str,
     args: dict,
@@ -779,11 +919,30 @@ def _dispatch_reflection_tool(
         return {"error": f"task_id not in shown train bundle: {task_id}"}, True
     if name == "read_repo_context":
         return _read_repo_context_path(project_root, manifest, args.get("path", "")), True
+    if name == "list_repo_files":
+        return _list_repo_files(project_root, manifest, args.get("prefix", "")), True
+    if name == "read_repo_file":
+        return _read_repo_file(project_root, manifest, args.get("path", "")), True
     if name == "read_tool_api":
         return _extract_tools_api(gen_dir), True
     if name == "propose_changes":
         return {"error": "propose_changes is handled by the reflection loop"}, False
     return {"error": f"unknown reflection tool: {name}"}, False
+
+
+def _counts_as_self_context(name: str, args: dict, result: object) -> bool:
+    """True when a reflection tool read architecture/self-model context."""
+    if isinstance(result, dict) and result.get("error"):
+        return False
+    if name == "read_mutable_file":
+        path = args.get("path")
+        return isinstance(path, str) and path.strip().startswith("self_model/")
+    if name == "read_repo_file":
+        return True
+    if name == "read_repo_context":
+        path = args.get("path")
+        return isinstance(path, str) and bool(path.strip()) and path.strip() != "tree"
+    return False
 
 
 def _proposal_from_tool_args(args: dict) -> dict:
@@ -948,6 +1107,7 @@ def reflect(
     )
     tools = _reflection_tool_specs()
     inspected = False
+    self_context_inspected = False
     fallback_content = None
 
     for step in range(1, _REFLECT_MAX_STEPS + 1):
@@ -980,7 +1140,8 @@ def reflect(
             messages.append({
                 "role": "user",
                 "content": (
-                    "Use read-only inspection tools if needed, then call "
+                    "Use read-only inspection tools, including one self_model/** "
+                    "file or filtered repo contract file, then call "
                     "`propose_changes`. Do not answer in plain text."
                 ),
             })
@@ -999,8 +1160,22 @@ def reflect(
                 if not inspected and step < _REFLECT_MAX_STEPS:
                     result = {
                         "error": (
-                            "Inspect at least one train case or mutable file "
+                            "Inspect at least one train case, mutable file, or repo file "
                             "before proposing changes."
+                        )
+                    }
+                    tool_result_msgs.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": json.dumps(result),
+                    })
+                    continue
+                if not self_context_inspected and step < _REFLECT_MAX_STEPS:
+                    result = {
+                        "error": (
+                            "Inspect at least one self_model/** file with "
+                            "read_mutable_file or one filtered repo contract file "
+                            "with read_repo_file/read_repo_context before proposing."
                         )
                     }
                     tool_result_msgs.append({
@@ -1020,6 +1195,9 @@ def reflect(
                 trajectories=trajectories or [],
             )
             inspected = inspected or counts
+            self_context_inspected = self_context_inspected or _counts_as_self_context(
+                name, args, result
+            )
             result_text = json.dumps(result) if not isinstance(result, str) else result
             if len(result_text) > _TOOL_RESULT_MAX_CHARS:
                 result_text = result_text[:_TOOL_RESULT_MAX_CHARS] + "\n...[truncated]..."

@@ -10,7 +10,8 @@ PrimeVul.
 - `orchestrator.py` is fixed rollback infrastructure; the evolving agent must
   never edit it.
 - The immutable `mutation_manifest.yaml` defines the snapshot and mutation
-  boundary. Current mutable roots are `agent/`, `tools/`, and `knowledge/`.
+  boundary. Current mutable roots are `agent/`, `tools/`, `knowledge/`, and
+  `self_model/`.
 - Kernel paths (`orchestrator.py`, `growth/`, `eval/`, `sandbox/`, tests,
   configs, data, and artifacts) are not candidate-editable.
 - `tools/base.py` has protected RPC/filesystem symbols; future generations may
@@ -25,7 +26,9 @@ PrimeVul.
   evolution, and test is reserved for final reporting.
 - Reflection runs as a read-only self-inspection loop: it can inspect selected
   train cases, mutable snapshot files, and filtered repo contracts through
-  tools, then submits a manifest-checked proposal for the next candidate.
+  tools. It can also list/read bounded repo files outside denied paths for
+  architecture self-inspection, then submits a manifest-checked proposal for
+  the next candidate.
 
 ## Prerequisites
 
@@ -97,6 +100,8 @@ timestamped directory under `artifacts/runs/`, containing:
   is reproducible after config drifts
 - `mutation_manifest.snapshot.yaml` — copy of the immutable mutation boundary
   used for that run
+- `proposals/gen_N.proposal.json` — full structured reflection proposal for
+  each attempted generation, kept outside candidate snapshots
 - `generations/gen_N/` — the full agent/tool snapshot for each generation in
   that run
 
@@ -109,10 +114,14 @@ in this order and uses the first that loads:
 2. `bstee615/bigvul`
 3. `DetectVul/devign`
 
-Splits are subsampled to 30 train / 15 val / 30 test, balanced 50/50
-between vulnerable and safe, with `random.seed(42)`. The chosen source
-and resulting sizes are recorded in `data/primevul/_source.json`. Add
-`--force` to rebuild from scratch.
+When a split cache is built, sizes come from the active config's `splits`
+section and are balanced 50/50 between vulnerable and safe with
+`random.seed(42)`. The chosen source and resulting cached sizes are recorded
+in `data/<data_dir>/_source.json`. At runtime, the orchestrator and benchmark
+also apply the active config's split sizes as caps over the cached JSONL files,
+so lowering `train` or `val` in a config makes quick experiments shorter
+without rebuilding the cache. Add `--force` to rebuild from scratch when you
+want newly sampled cached splits.
 
 ## Sandbox network policy
 
@@ -146,6 +155,6 @@ Tests mock the Docker subprocess, so they run without a Docker daemon.
 ## Layout
 
 Core source lives in `orchestrator.py`, `agent/`, `tools/`, `knowledge/`,
-`growth/`, `eval/`, and `sandbox/`. Local agent-editing rules live in
-`agent/AGENT.md`; the authoritative mutation boundary lives in
+`self_model/`, `growth/`, `eval/`, and `sandbox/`. Local agent-editing rules
+live in `agent/AGENT.md`; the authoritative mutation boundary lives in
 `mutation_manifest.yaml`.

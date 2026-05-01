@@ -220,7 +220,7 @@ def build_splits(config: dict, project_root: Path | None = None,
 
 def load_split(split_name: str, project_root: Path | None = None,
                config: dict | None = None) -> list:
-    """Read a cached split from data/<data_dir>/<split>.jsonl."""
+    """Read a cached split and apply the configured runtime split cap."""
     if project_root is None:
         project_root = Path(__file__).resolve().parent.parent
     if config is None:
@@ -235,6 +235,12 @@ def load_split(split_name: str, project_root: Path | None = None,
             line = line.strip()
             if line:
                 tasks.append(json.loads(line))
+    try:
+        limit = int((config.get("splits") or {}).get(split_name))
+    except (TypeError, ValueError, AttributeError):
+        limit = None
+    if limit is not None and limit > 0:
+        tasks = tasks[:limit]
     return tasks
 
 

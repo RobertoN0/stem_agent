@@ -10,7 +10,7 @@ import json
 import re
 from pathlib import Path
 
-from tools.base import llm_call, read_file, run_bash, static_scan, note
+from tools.base import llm_call, read_file, list_dir, run_bash, static_scan, note
 
 
 _PROMPT_PATH = Path(__file__).parent / "prompt.txt"
@@ -35,6 +35,27 @@ _TOOL_SPECS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Absolute path to read."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "description": (
+                "List entries in a directory under /agent (generation snapshot) "
+                "or /work (scratch). Use this to discover available self-model, "
+                "knowledge, agent, or tool files before reading them."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute directory path to list.",
+                    },
                 },
                 "required": ["path"],
             },
@@ -120,6 +141,11 @@ def _dispatch(name: str, args: dict, task_code: str = ""):
     if name == "read_file":
         try:
             return read_file(args["path"])
+        except Exception as e:
+            return f"error: {e}"
+    elif name == "list_dir":
+        try:
+            return list_dir(args["path"])
         except Exception as e:
             return f"error: {e}"
     elif name == "run_bash":

@@ -111,7 +111,25 @@ def _load_split(config: dict, project_root: Path, split_name: str) -> list:
             line = line.strip()
             if line:
                 tasks.append(json.loads(line))
+    limit = _configured_split_limit(config, split_name)
+    if limit is not None:
+        tasks = tasks[:limit]
     return tasks
+
+
+def _configured_split_limit(config: dict, split_name: str) -> Optional[int]:
+    """Return the configured task cap for a split, if present and valid."""
+    try:
+        value = (config.get("splits") or {}).get(split_name)
+    except AttributeError:
+        return None
+    if value is None:
+        return None
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return None
+    return limit if limit > 0 else None
 
 
 # --- LLM proxy --------------------------------------------------------------
@@ -146,6 +164,7 @@ def _tool_call_names(tool_calls: Optional[list]) -> list[str]:
 
 _SOLVE_INSPECTION_TOOLS = frozenset({
     "read_file",
+    "list_dir",
     "static_scan",
     "note",
     "run_bash",
@@ -246,6 +265,7 @@ def _finalize_task_telemetry(
         "used_inspection_tool": int(telemetry.get("inspection_tool_calls", 0)) > 0,
         "used_static_scan": counts.get("static_scan", 0) > 0,
         "used_read_file": counts.get("read_file", 0) > 0,
+        "used_list_dir": counts.get("list_dir", 0) > 0,
         "used_note": counts.get("note", 0) > 0,
         "used_finalize_tool": counts.get("finalize", 0) > 0,
         "runtime_helper_calls_by_name": runtime_counts,
@@ -294,6 +314,7 @@ def _aggregate_task_telemetry(results: list) -> dict:
         "tasks_with_direct_static_scan": 0,
         "tasks_with_static_scan": 0,
         "tasks_with_read_file": 0,
+        "tasks_with_list_dir": 0,
         "tasks_with_note": 0,
         "tasks_with_finalize_tool": 0,
         "tasks_finalized_on_step_1": 0,
@@ -362,6 +383,8 @@ def _aggregate_task_telemetry(results: list) -> dict:
             summary["tasks_with_static_scan"] += 1
         if tel.get("used_read_file"):
             summary["tasks_with_read_file"] += 1
+        if tel.get("used_list_dir"):
+            summary["tasks_with_list_dir"] += 1
         if tel.get("used_note"):
             summary["tasks_with_note"] += 1
         if tel.get("used_finalize_tool"):
@@ -1197,9 +1220,12 @@ class ConsoleLogger:
         if event == "reflect_start":
             return f"{prefix}reflection start parent={fields.get('parent_dir')}"
         if event == "proposal":
+            path = fields.get("path")
+            path_str = f" saved={path}" if path else ""
             return (
                 f"{prefix}proposal kind={fields.get('kind')} intent={fields.get('intent')} "
                 f"kinds={fields.get('kinds')} rationale={_short(fields.get('rationale'))}"
+                f"{path_str}"
             )
         if event == "reflect_rationale_unjustified":
             return (
@@ -1553,6 +1579,16 @@ def _rationale_cites_failure(proposal: dict, trajectories: list) -> bool:
     return any(tid in rationale for tid in failure_ids if tid)
 
 
+def _write_proposal_artifact(run_dir: Path, gen_idx: int, proposal: dict) -> Path:
+    """Persist the full reflection proposal outside generation snapshots."""
+    proposals_dir = run_dir / "proposals"
+    proposals_dir.mkdir(parents=True, exist_ok=True)
+    path = proposals_dir / f"gen_{gen_idx}.proposal.json"
+    payload = {"generation": gen_idx, "proposal": proposal}
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return path
+
+
 def _build_self_observation(train_score: dict, evolution_history: list) -> dict:
     """Package train-only behavioral telemetry for the reflection prompt."""
     return {
@@ -1773,12 +1809,14 @@ def main() -> None:
             proposal_kinds = _proposal_kinds(proposal)
             proposal_intent = _proposal_intent(proposal)
             proposal_rationale = _proposal_rationale(proposal)
+            proposal_artifact = _write_proposal_artifact(run_dir, gen_idx, proposal)
 
             log("proposal",
                 kind=proposal_kind,
                 kinds=proposal_kinds,
                 intent=proposal_intent,
-                rationale=proposal_rationale[:300])
+                rationale=proposal_rationale[:300],
+                path=str(proposal_artifact))
 
             if not _rationale_cites_failure(proposal, trajectories):
                 log("reflect_rationale_unjustified",

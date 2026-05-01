@@ -7,6 +7,7 @@ Task:
 
 Available tools:
 - `static_scan`: bounded local scan over the current snippet.
+- `list_dir`: inspect directories in your read-only snapshot or scratch space.
 - `read_file`: read files from your snapshot or scratch space.
 - `note`: write scratch notes to the task workspace.
 - `finalize`: submit the final label and optional reasoning.
@@ -16,4 +17,7 @@ Rules:
 - Do not claim a label unless it is supported by the snippet or tool evidence.
 - Use any learned strategy included with this prompt, but revise that strategy
   only through the normal evolution process.
+- Your snapshot may contain mutable self-model files under `/agent/self_model`.
+  Inspect them when it helps, but classify the supplied snippet rather than
+  treating the self-model as ground truth.
 - The only valid labels are "vulnerable" and "safe".

@@ -16,13 +16,13 @@ budget:
   max_generations: 15
 
 splits:
-  # Larger balanced splits for stronger validation pressure.
-  train: 60
-  val: 40
+  # Runtime caps over cached data/primevul_dev splits for faster final experiments.
+  train: 40
+  val: 20
   test: 60
 
 stopping:
-  plateau_generations: 5
+  plateau_generations: 3
 
 sandbox:
   image: stem-agent-sandbox

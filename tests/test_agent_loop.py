@@ -11,6 +11,7 @@ def test_agent_exposes_static_scan_instead_of_open_ended_bash():
     }
 
     assert "static_scan" in tool_names
+    assert "list_dir" in tool_names
     assert "run_bash" not in tool_names
 
 
@@ -37,6 +38,22 @@ def test_dispatch_static_scan_uses_current_task_code(monkeypatch):
             {"language": "c_cpp", "run_external": True, "timeout": 3},
         )
     ]
+
+
+def test_dispatch_list_dir_uses_bounded_tool(monkeypatch):
+    agent_module = importlib.import_module("agent.agent")
+    calls = []
+
+    def fake_list_dir(path):
+        calls.append(path)
+        return ["agent.py", "prompt.txt"]
+
+    monkeypatch.setattr(agent_module, "list_dir", fake_list_dir)
+
+    result = agent_module._dispatch("list_dir", {"path": "/agent/agent"})
+
+    assert result == ["agent.py", "prompt.txt"]
+    assert calls == ["/agent/agent"]
 
 
 def test_solve_task_accepts_text_only_safe_verdict(monkeypatch):

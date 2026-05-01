@@ -108,9 +108,11 @@ def test_bootstrap_can_target_run_scoped_generation_root(seeded_project, basic_c
 def test_bootstrap_uses_manifest_snapshot_roots(seeded_project, basic_config):
     (seeded_project / "knowledge").mkdir()
     (seeded_project / "knowledge" / "strategy.md").write_text("seed\n")
+    (seeded_project / "self_model").mkdir()
+    (seeded_project / "self_model" / "architecture.md").write_text("map\n")
     manifest = {
-        "snapshot_roots": ["agent", "tools", "knowledge"],
-        "mutable_paths": ["agent/**", "tools/**", "knowledge/**"],
+        "snapshot_roots": ["agent", "tools", "knowledge", "self_model"],
+        "mutable_paths": ["agent/**", "tools/**", "knowledge/**", "self_model/**"],
         "protected_files": ["agent/agent.py", "agent/prompt.txt", "tools/base.py"],
         "protected_symbols": {},
     }
@@ -123,13 +125,14 @@ def test_bootstrap_uses_manifest_snapshot_roots(seeded_project, basic_config):
     )
 
     assert (gen0 / "knowledge" / "strategy.md").read_text() == "seed\n"
+    assert (gen0 / "self_model" / "architecture.md").read_text() == "map\n"
 
 
 def test_snapshot_mutation_manifest_writes_run_copy(seeded_project):
     run_dir = seeded_project / "artifacts" / "runs" / "run_x"
     run_dir.mkdir(parents=True)
     (seeded_project / "mutation_manifest.yaml").write_text(
-        "version: 1\nsnapshot_roots: [agent, tools, knowledge]\n"
+        "version: 1\nsnapshot_roots: [agent, tools, knowledge, self_model]\n"
     )
     manifest = load_mutation_manifest(seeded_project)
 
@@ -137,6 +140,7 @@ def test_snapshot_mutation_manifest_writes_run_copy(seeded_project):
 
     assert snapshot == run_dir / "mutation_manifest.snapshot.yaml"
     assert "knowledge" in snapshot.read_text()
+    assert "self_model" in snapshot.read_text()
 
 
 def test_snapshot_ignores_python_cache_artifacts(seeded_project, basic_config):
@@ -153,6 +157,45 @@ def test_snapshot_ignores_python_cache_artifacts(seeded_project, basic_config):
     assert not (gen0 / "tools" / "__pycache__").exists()
     assert not (gen1 / "agent" / "__pycache__").exists()
     assert not (gen1 / "tools" / "__pycache__").exists()
+
+
+def test_load_split_applies_configured_runtime_cap(tmp_path, basic_config):
+    data_dir = tmp_path / basic_config["paths"]["data_dir"]
+    data_dir.mkdir(parents=True)
+    tasks = [
+        {"id": f"t{i}", "code": "int x;", "label": "safe"}
+        for i in range(5)
+    ]
+    (data_dir / "train.jsonl").write_text(
+        "\n".join(json.dumps(task) for task in tasks) + "\n"
+    )
+    basic_config["splits"]["train"] = 3
+
+    loaded = orchestrator._load_split(basic_config, tmp_path, "train")
+
+    assert [task["id"] for task in loaded] == ["t0", "t1", "t2"]
+
+
+def test_dataset_load_split_applies_configured_runtime_cap(tmp_path):
+    from eval.dataset import load_split
+
+    config = {
+        "paths": {"data_dir": "data/custom"},
+        "splits": {"val": 2},
+    }
+    data_dir = tmp_path / "data" / "custom"
+    data_dir.mkdir(parents=True)
+    tasks = [
+        {"id": f"v{i}", "code": "int x;", "label": "safe"}
+        for i in range(4)
+    ]
+    (data_dir / "val.jsonl").write_text(
+        "\n".join(json.dumps(task) for task in tasks) + "\n"
+    )
+
+    loaded = load_split("val", project_root=tmp_path, config=config)
+
+    assert [task["id"] for task in loaded] == ["v0", "v1"]
 
 
 def test_aggregate_counts_errors_as_wrong():
@@ -510,6 +553,26 @@ def test_proposal_summary_helpers_support_bundles_and_halt():
     assert orchestrator._proposal_rationale(legacy) == "task t1"
 
 
+def test_write_proposal_artifact_stays_outside_generation_snapshots(tmp_path):
+    proposal = {
+        "rationale": "task t1",
+        "intent": "iterate",
+        "changes": [
+            {"kind": "replace_file",
+             "details": {"path": "self_model/failure_modes.md", "content": "x"}},
+        ],
+    }
+
+    path = orchestrator._write_proposal_artifact(tmp_path, 3, proposal)
+
+    payload = json.loads(path.read_text())
+    assert path == tmp_path / "proposals" / "gen_3.proposal.json"
+    assert payload["generation"] == 3
+    assert payload["proposal"]["changes"][0]["details"]["path"] == (
+        "self_model/failure_modes.md"
+    )
+
+
 def test_read_mutable_files_covers_created_and_deleted_files(tmp_path):
     gen_dir = tmp_path
     (gen_dir / "agent").mkdir()
@@ -538,14 +601,17 @@ def test_read_mutable_files_uses_manifest_roots(tmp_path):
     (gen_dir / "tools" / "base.py").write_text("# tools\n")
     (gen_dir / "knowledge").mkdir()
     (gen_dir / "knowledge" / "strategy.md").write_text("seed\n")
+    (gen_dir / "self_model").mkdir()
+    (gen_dir / "self_model" / "architecture.md").write_text("map\n")
     manifest = {
-        "snapshot_roots": ["agent", "tools", "knowledge"],
-        "mutable_paths": ["agent/**", "tools/**", "knowledge/**"],
+        "snapshot_roots": ["agent", "tools", "knowledge", "self_model"],
+        "mutable_paths": ["agent/**", "tools/**", "knowledge/**", "self_model/**"],
     }
 
     files = orchestrator._read_mutable_files(gen_dir, manifest=manifest)
 
     assert files["knowledge/strategy.md"] == b"seed\n"
+    assert files["self_model/architecture.md"] == b"map\n"
 
 
 def test_aggregate_per_task_carries_raw_and_error():
