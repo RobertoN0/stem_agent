@@ -269,12 +269,89 @@ def _format_trajectory_summary(traj: dict, n: int, kind: str) -> str:
     expected = traj.get("expected", "?")
     predicted = "(error)" if traj.get("errored") else traj.get("predicted")
     bucket = traj.get("reflection_bucket", "?")
+    telemetry = traj.get("telemetry") or {}
+    tools = telemetry.get("tool_calls_by_name") or {}
+    tool_str = ", ".join(f"{name}={count}" for name, count in sorted(tools.items()))
+    if not tool_str:
+        tool_str = "none"
     raw = (traj.get("raw") or "").strip().replace("\n", " ")
     raw = raw[:240] + ("..." if len(raw) > 240 else "")
     return (
         f"[{kind} {n}] task_id={task_id} expected={expected} "
-        f"predicted={predicted} bucket={bucket} raw={raw or '(no raw output)'}"
+        f"predicted={predicted} bucket={bucket} "
+        f"llm_calls={telemetry.get('llm_calls', '?')} tools={tool_str} "
+        f"raw={raw or '(no raw output)'}"
     )
+
+
+def _format_self_observation(self_observation: Optional[dict]) -> str:
+    if not self_observation:
+        return "(no self-observation telemetry available)"
+
+    solve = self_observation.get("solve_telemetry") or {}
+    source_split = self_observation.get("source_split") or "train"
+    tool_counts = solve.get("tool_calls_by_name") or {}
+    first_tool_counts = solve.get("first_tool_counts") or {}
+    recent = self_observation.get("recent_proposals") or []
+
+    def _counts_text(counts: dict) -> str:
+        if not counts:
+            return "none"
+        return ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
+
+    lines = [
+        f"Source split: {source_split} only. This contains behavior telemetry, "
+        "not validation/test task contents.",
+        (
+            "Telemetry scope: tool-use counts here are LLM-requested tool calls "
+            "observed by the orchestrator gateway. Direct helper calls inside "
+            "mutable code, such as agent.py precomputing static_scan before "
+            "llm_call, are not counted here; inspect agent.py before concluding "
+            "the workflow uses no tools."
+        ),
+        (
+            "Solve calls: "
+            f"tasks={solve.get('n_tasks', 0)}, "
+            f"total_llm_calls={solve.get('llm_calls_total', 0)}, "
+            f"avg_llm_calls_per_task={solve.get('avg_llm_calls_per_task', 0.0):.2f}, "
+            f"max_llm_calls_per_task={solve.get('max_llm_calls_per_task', 0)}"
+        ),
+        (
+            "Tool use: "
+            f"tool_calls_total={solve.get('tool_calls_total', 0)}, "
+            f"inspection_tool_calls_total={solve.get('inspection_tool_calls_total', 0)}, "
+            f"tool_use_rate={solve.get('tool_use_rate', 0.0):.2f}, "
+            f"inspection_tool_use_rate={solve.get('inspection_tool_use_rate', 0.0):.2f}, "
+            f"immediate_finalize_rate={solve.get('immediate_finalize_rate', 0.0):.2f}"
+        ),
+        f"Tool counts by name: {_counts_text(tool_counts)}",
+        f"First tool counts: {_counts_text(first_tool_counts)}",
+        (
+            "Task counts: "
+            f"static_scan={solve.get('tasks_with_static_scan', 0)}, "
+            f"read_file={solve.get('tasks_with_read_file', 0)}, "
+            f"note={solve.get('tasks_with_note', 0)}, "
+            f"finalize_tool={solve.get('tasks_with_finalize_tool', 0)}, "
+            f"text_response={solve.get('tasks_with_text_response', 0)}"
+        ),
+    ]
+
+    if recent:
+        lines.append("Recent proposal outcomes:")
+        for item in recent[-6:]:
+            changed = item.get("changed_files") or []
+            changed_text = ", ".join(changed[:5]) if changed else "none"
+            if len(changed) > 5:
+                changed_text += ", ..."
+            lines.append(
+                f"- gen={item.get('gen')} outcome={item.get('outcome')} "
+                f"stage={item.get('stage')} kinds={item.get('kinds')} "
+                f"changed_files={changed_text}"
+            )
+    else:
+        lines.append("Recent proposal outcomes: none yet")
+
+    return "\n".join(lines)
 
 
 def _build_messages(
@@ -287,6 +364,7 @@ def _build_messages(
     repo_context: str = "",
     mutable_snapshot_context: str = "",
     score_split: str = "val",
+    self_observation: Optional[dict] = None,
 ) -> list:
     cm = _compute_confusion(score.get("per_task", []))
     n_tasks = score.get("n_tasks", 0)
@@ -360,6 +438,10 @@ SUCCESS TRAJECTORIES  ({len(successes)} shown for contrast)
 ══════════════════════════════════════════════════════════════════════
 {success_blocks}
 ══════════════════════════════════════════════════════════════════════
+TRAIN-ONLY SELF-OBSERVATION
+══════════════════════════════════════════════════════════════════════
+{_format_self_observation(self_observation)}
+══════════════════════════════════════════════════════════════════════
 INSPECTION CONTEXT AVAILABLE THROUGH TOOLS
 ══════════════════════════════════════════════════════════════════════
 
@@ -383,6 +465,11 @@ The trajectories are a balanced sample of the train split, not a target list to
 memorize. Use them to infer general error patterns. Preserve both vulnerable
 recall and safe precision; do not fix one class by broadly sacrificing the
 other.
+
+Use the self-observation telemetry to reason about the agent's own behavior:
+whether it is using tools, whether it finalizes too early, and whether recent
+mutations keep changing the same surface without progress. Do not treat it as
+a command to use a specific tool or edit a specific file.
 
 Choose among mutable surfaces neutrally:
 - agent/agent.py can change workflow, tool-use policy, or how context is assembled.
@@ -802,6 +889,7 @@ def reflect(
     score_split: str = "val",
     project_root: Optional[Path] = None,
     manifest: Optional[dict] = None,
+    self_observation: Optional[dict] = None,
 ) -> Optional[dict]:
     """Produce a structured JSON proposal for the next generation.
 
@@ -833,6 +921,7 @@ def reflect(
         agent_py=agent_py,
         prompt_txt=prompt_txt,
         tools_api=_extract_tools_api(gen_dir),
+        self_observation=self_observation,
     )
     tools = _reflection_tool_specs()
     inspected = False

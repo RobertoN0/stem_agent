@@ -144,6 +144,151 @@ def _tool_call_names(tool_calls: Optional[list]) -> list[str]:
     return names
 
 
+_SOLVE_INSPECTION_TOOLS = frozenset({
+    "read_file",
+    "static_scan",
+    "note",
+    "run_bash",
+})
+
+
+def _new_task_telemetry() -> dict:
+    return {
+        "llm_calls": 0,
+        "tool_call_turns": 0,
+        "text_response_turns": 0,
+        "tool_calls_by_name": {},
+        "inspection_tool_calls": 0,
+        "first_tool": None,
+        "finalized_on_step": None,
+    }
+
+
+def _record_task_llm_response(telemetry: dict, response_env: dict, step_in_task) -> None:
+    """Track solve-time behavior from the gateway response, not model content."""
+    try:
+        step = int(step_in_task)
+    except (TypeError, ValueError):
+        step = telemetry["llm_calls"] + 1
+
+    telemetry["llm_calls"] += 1
+    names = _tool_call_names(response_env.get("tool_calls"))
+    if names:
+        telemetry["tool_call_turns"] += 1
+        if telemetry["first_tool"] is None:
+            telemetry["first_tool"] = names[0]
+    else:
+        telemetry["text_response_turns"] += 1
+
+    counts = telemetry["tool_calls_by_name"]
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+        if name in _SOLVE_INSPECTION_TOOLS:
+            telemetry["inspection_tool_calls"] += 1
+        if name == "finalize" and telemetry["finalized_on_step"] is None:
+            telemetry["finalized_on_step"] = step
+
+
+def _finalize_task_telemetry(telemetry: dict) -> dict:
+    """Return a JSON-friendly task telemetry record."""
+    counts = dict(sorted((telemetry.get("tool_calls_by_name") or {}).items()))
+    finalized_on_step = telemetry.get("finalized_on_step")
+    out = {
+        "llm_calls": int(telemetry.get("llm_calls", 0)),
+        "tool_call_turns": int(telemetry.get("tool_call_turns", 0)),
+        "text_response_turns": int(telemetry.get("text_response_turns", 0)),
+        "tool_calls_by_name": counts,
+        "inspection_tool_calls": int(telemetry.get("inspection_tool_calls", 0)),
+        "first_tool": telemetry.get("first_tool"),
+        "finalized_on_step": finalized_on_step,
+        "immediate_finalize": finalized_on_step == 1,
+        "used_inspection_tool": int(telemetry.get("inspection_tool_calls", 0)) > 0,
+        "used_static_scan": counts.get("static_scan", 0) > 0,
+        "used_read_file": counts.get("read_file", 0) > 0,
+        "used_note": counts.get("note", 0) > 0,
+        "used_finalize_tool": counts.get("finalize", 0) > 0,
+    }
+    return out
+
+
+def _aggregate_task_telemetry(results: list) -> dict:
+    """Summarize train/val solve behavior without reading model prompts."""
+    n_tasks = len(results)
+    summary = {
+        "n_tasks": n_tasks,
+        "llm_calls_total": 0,
+        "tool_calls_total": 0,
+        "inspection_tool_calls_total": 0,
+        "tool_calls_by_name": {},
+        "first_tool_counts": {},
+        "tasks_with_any_tool_call": 0,
+        "tasks_with_inspection_tool": 0,
+        "tasks_with_static_scan": 0,
+        "tasks_with_read_file": 0,
+        "tasks_with_note": 0,
+        "tasks_with_finalize_tool": 0,
+        "tasks_finalized_on_step_1": 0,
+        "tasks_with_text_response": 0,
+        "max_llm_calls_per_task": 0,
+    }
+
+    for result in results:
+        tel = result.get("telemetry") or {}
+        llm_calls = int(tel.get("llm_calls", 0))
+        counts = tel.get("tool_calls_by_name") or {}
+        tool_calls = sum(int(v) for v in counts.values())
+        summary["llm_calls_total"] += llm_calls
+        summary["tool_calls_total"] += tool_calls
+        summary["inspection_tool_calls_total"] += int(tel.get("inspection_tool_calls", 0))
+        summary["max_llm_calls_per_task"] = max(
+            summary["max_llm_calls_per_task"], llm_calls
+        )
+        for name, count in counts.items():
+            summary["tool_calls_by_name"][name] = (
+                summary["tool_calls_by_name"].get(name, 0) + int(count)
+            )
+        first_tool = tel.get("first_tool")
+        if first_tool:
+            summary["first_tool_counts"][first_tool] = (
+                summary["first_tool_counts"].get(first_tool, 0) + 1
+            )
+        if tool_calls > 0:
+            summary["tasks_with_any_tool_call"] += 1
+        if tel.get("used_inspection_tool"):
+            summary["tasks_with_inspection_tool"] += 1
+        if tel.get("used_static_scan"):
+            summary["tasks_with_static_scan"] += 1
+        if tel.get("used_read_file"):
+            summary["tasks_with_read_file"] += 1
+        if tel.get("used_note"):
+            summary["tasks_with_note"] += 1
+        if tel.get("used_finalize_tool"):
+            summary["tasks_with_finalize_tool"] += 1
+        if tel.get("immediate_finalize"):
+            summary["tasks_finalized_on_step_1"] += 1
+        if int(tel.get("text_response_turns", 0)) > 0:
+            summary["tasks_with_text_response"] += 1
+
+    if n_tasks:
+        summary["avg_llm_calls_per_task"] = summary["llm_calls_total"] / n_tasks
+        summary["tool_use_rate"] = summary["tasks_with_any_tool_call"] / n_tasks
+        summary["inspection_tool_use_rate"] = (
+            summary["tasks_with_inspection_tool"] / n_tasks
+        )
+        summary["immediate_finalize_rate"] = (
+            summary["tasks_finalized_on_step_1"] / n_tasks
+        )
+    else:
+        summary["avg_llm_calls_per_task"] = 0.0
+        summary["tool_use_rate"] = 0.0
+        summary["inspection_tool_use_rate"] = 0.0
+        summary["immediate_finalize_rate"] = 0.0
+
+    summary["tool_calls_by_name"] = dict(sorted(summary["tool_calls_by_name"].items()))
+    summary["first_tool_counts"] = dict(sorted(summary["first_tool_counts"].items()))
+    return summary
+
+
 def _summarize_static_scan_result(content) -> str:
     try:
         data = json.loads(content) if isinstance(content, str) else content
@@ -361,23 +506,35 @@ def _run_task_protocol(
     """
     deadline = time.monotonic() + timeout_s
     task_usage = {"prompt_tokens": 0, "completion_tokens": 0, "n_calls": 0}
+    task_telemetry = _new_task_telemetry()
     task_id = task.get("id") if isinstance(task, dict) else None
+
+    def _with_protocol_stats(payload: dict) -> dict:
+        payload["usage"] = task_usage
+        payload["telemetry"] = _finalize_task_telemetry(task_telemetry)
+        return payload
 
     try:
         send_line(json.dumps({"_kind": "task", "task": task}))
     except (BrokenPipeError, OSError) as e:
-        return {"error": f"host: failed to write task envelope: {e}",
-                "task_id": task_id, "usage": task_usage}
+        return _with_protocol_stats({
+            "error": f"host: failed to write task envelope: {e}",
+            "task_id": task_id,
+        })
 
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return {"error": "host: protocol deadline exceeded",
-                    "task_id": task_id, "usage": task_usage}
+            return _with_protocol_stats({
+                "error": "host: protocol deadline exceeded",
+                "task_id": task_id,
+            })
         line = recv_line(remaining)
         if line is None:
-            return {"error": "host: container closed stdout before result",
-                    "task_id": task_id, "usage": task_usage}
+            return _with_protocol_stats({
+                "error": "host: container closed stdout before result",
+                "task_id": task_id,
+            })
         try:
             env = json.loads(line)
         except json.JSONDecodeError:
@@ -392,17 +549,23 @@ def _run_task_protocol(
                 task_usage["prompt_tokens"] += int(u.get("prompt_tokens", 0))
                 task_usage["completion_tokens"] += int(u.get("completion_tokens", 0))
                 task_usage["n_calls"] += 1
+                _record_task_llm_response(
+                    task_telemetry, response_env, env.get("step_in_task")
+                )
             try:
                 send_line(json.dumps(response_env))
             except (BrokenPipeError, OSError) as e:
-                return {"error": f"host: failed to write llm_response: {e}",
-                        "task_id": task_id, "usage": task_usage}
+                return _with_protocol_stats({
+                    "error": f"host: failed to write llm_response: {e}",
+                    "task_id": task_id,
+                })
         elif kind == "result":
             result = env.get("result", {}) or {}
             if "task_id" not in result:
                 result["task_id"] = task_id
             # Orchestrator-tracked usage is ground truth.
             result["usage"] = task_usage
+            result["telemetry"] = _finalize_task_telemetry(task_telemetry)
             return result
         else:
             if log_event:
@@ -651,6 +814,7 @@ def aggregate(results: list, config: dict) -> dict:
                 "errored": True,
                 "raw": None,
                 "error": r.get("error"),
+                "telemetry": r.get("telemetry") or {},
             })
             continue
         predicted = _normalize_label(r.get("label"))
@@ -662,6 +826,7 @@ def aggregate(results: list, config: dict) -> dict:
             "errored": False,
             "raw": r.get("raw"),
             "error": None,
+            "telemetry": r.get("telemetry") or {},
         })
     return {
         "macro_f1": _macro_f1(per_task),
@@ -672,6 +837,7 @@ def aggregate(results: list, config: dict) -> dict:
         "errors": errors,
         "n_tasks": len(per_task),
         "n_errors": len(errors),
+        "telemetry": _aggregate_task_telemetry(results),
     }
 
 
@@ -711,6 +877,10 @@ def run_candidate(
                 errored="error" in r,
                 error=r.get("error"),
                 n_llm_calls=(r.get("usage") or {}).get("n_calls", 0),
+                tool_calls_by_name=(r.get("telemetry") or {}).get("tool_calls_by_name", {}),
+                first_tool=(r.get("telemetry") or {}).get("first_tool"),
+                finalized_on_step=(r.get("telemetry") or {}).get("finalized_on_step"),
+                used_inspection_tool=(r.get("telemetry") or {}).get("used_inspection_tool"),
             )
             if "error" in r:
                 log_event("error_task", task_id=task.get("id"), error=r["error"])
@@ -1235,6 +1405,15 @@ def _rationale_cites_failure(proposal: dict, trajectories: list) -> bool:
     return any(tid in rationale for tid in failure_ids if tid)
 
 
+def _build_self_observation(train_score: dict, evolution_history: list) -> dict:
+    """Package train-only behavioral telemetry for the reflection prompt."""
+    return {
+        "source_split": "train",
+        "solve_telemetry": train_score.get("telemetry") or {},
+        "recent_proposals": evolution_history[-6:],
+    }
+
+
 # --- main loop --------------------------------------------------------------
 
 def _new_run_dir(config: dict, project_root: Path) -> tuple:
@@ -1365,6 +1544,7 @@ def main() -> None:
         plateau = 0
         train_task_code_map = {t.get("id"): t.get("code", "") for t in train_split}
         plateau_limit = config["stopping"]["plateau_generations"]
+        evolution_history: list[dict] = []
 
         from growth.reflect import reflect
         from growth.apply import apply_proposal
@@ -1419,6 +1599,9 @@ def main() -> None:
                     score_split="train",
                     project_root=project_root,
                     manifest=manifest,
+                    self_observation=_build_self_observation(
+                        parent_train_score, evolution_history
+                    ),
                 )
             except ValueError as e:
                 log("reflect_parse_error", error=str(e))
@@ -1465,12 +1648,30 @@ def main() -> None:
                     kinds=proposal_kinds,
                     intent=proposal_intent,
                     error=str(e))
+                evolution_history.append({
+                    "gen": gen_idx,
+                    "intent": proposal_intent,
+                    "kinds": proposal_kinds,
+                    "changed_files": [],
+                    "outcome": "invalid",
+                    "stage": "apply",
+                    "error": str(e)[:180],
+                })
                 shutil.rmtree(candidate_dir)
                 if _bump_plateau_or_stop("proposal_invalid"):
                     break
                 continue
             except Exception as e:
                 log("apply_error", error=f"{e.__class__.__name__}: {e}")
+                evolution_history.append({
+                    "gen": gen_idx,
+                    "intent": proposal_intent,
+                    "kinds": proposal_kinds,
+                    "changed_files": [],
+                    "outcome": "error",
+                    "stage": "apply",
+                    "error": f"{e.__class__.__name__}: {e}"[:180],
+                })
                 shutil.rmtree(candidate_dir)
                 if _bump_plateau_or_stop("apply_error"):
                     break
@@ -1491,6 +1692,14 @@ def main() -> None:
                 changed_files=changed_files[:20])
             if before_files == after_files and not halt_requested:
                 log("proposal_noop", kind=proposal_kind, kinds=proposal_kinds)
+                evolution_history.append({
+                    "gen": gen_idx,
+                    "intent": proposal_intent,
+                    "kinds": proposal_kinds,
+                    "changed_files": [],
+                    "outcome": "noop",
+                    "stage": "apply",
+                })
                 shutil.rmtree(candidate_dir)
                 if _bump_plateau_or_stop("proposal_noop"):
                     break
@@ -1505,6 +1714,14 @@ def main() -> None:
             if not smoke_test(candidate_dir, config, task=train_split[0],
                               llm_handler=handler, log_event=log):
                 log("gate_reject", stage="smoke")
+                evolution_history.append({
+                    "gen": gen_idx,
+                    "intent": proposal_intent,
+                    "kinds": proposal_kinds,
+                    "changed_files": changed_files,
+                    "outcome": "rejected",
+                    "stage": "smoke",
+                })
                 shutil.rmtree(candidate_dir)
                 if halt_requested:
                     stop_reason = "agent_halt"
@@ -1547,12 +1764,28 @@ def main() -> None:
                     plateau = 0
                 else:
                     plateau += 1
+                evolution_history.append({
+                    "gen": gen_idx,
+                    "intent": proposal_intent,
+                    "kinds": proposal_kinds,
+                    "changed_files": changed_files,
+                    "outcome": "accepted",
+                    "stage": "val_gate",
+                })
             else:
                 reject_stage = "val_errors" if cand_val_score["n_errors"] > 0 else "val"
                 log("gate_reject", stage=reject_stage,
                     parent_f1=parent_val_macro_f1,
                     candidate_f1=cand_val_score["macro_f1"],
                     candidate_errors=cand_val_score["n_errors"])
+                evolution_history.append({
+                    "gen": gen_idx,
+                    "intent": proposal_intent,
+                    "kinds": proposal_kinds,
+                    "changed_files": changed_files,
+                    "outcome": "rejected",
+                    "stage": reject_stage,
+                })
                 plateau += 1
 
             if halt_requested:

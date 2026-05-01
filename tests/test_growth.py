@@ -522,6 +522,31 @@ def test_build_messages_includes_balanced_case_index_and_tool_guidance(gen_dir):
         agent_py="def solve_task(t): pass",
         prompt_txt="be a reviewer",
         tools_api="def llm_call(...): ...",
+        self_observation={
+            "source_split": "train",
+            "solve_telemetry": {
+                "n_tasks": 1,
+                "llm_calls_total": 1,
+                "avg_llm_calls_per_task": 1.0,
+                "max_llm_calls_per_task": 1,
+                "tool_calls_total": 1,
+                "inspection_tool_calls_total": 0,
+                "tool_use_rate": 1.0,
+                "inspection_tool_use_rate": 0.0,
+                "immediate_finalize_rate": 1.0,
+                "tool_calls_by_name": {"finalize": 1},
+                "first_tool_counts": {"finalize": 1},
+                "tasks_with_static_scan": 0,
+                "tasks_with_read_file": 0,
+                "tasks_with_note": 0,
+                "tasks_with_finalize_tool": 1,
+                "tasks_with_text_response": 0,
+            },
+            "recent_proposals": [
+                {"gen": 1, "outcome": "rejected", "stage": "val",
+                 "kinds": ["edit_prompt"], "changed_files": ["agent/prompt.txt"]},
+            ],
+        },
     )
     user = messages[1]["content"]
     assert "task_id=t1" in user
@@ -540,6 +565,12 @@ def test_build_messages_includes_balanced_case_index_and_tool_guidance(gen_dir):
     assert "replace_function" in user
     assert "\"intent\": \"iterate\"" in user
     assert "\"changes\"" in user
+    assert "TRAIN-ONLY SELF-OBSERVATION" in user
+    assert "LLM-requested tool calls" in user
+    assert "Direct helper calls inside mutable code" in user
+    assert "Tool counts by name: finalize=1" in user
+    assert "outcome=rejected" in user
+    assert "changed_files=agent/prompt.txt" in user
     assert "gets(buf)" not in user
 
 

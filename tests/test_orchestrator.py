@@ -232,10 +232,47 @@ def test_protocol_proxies_llm_request_and_returns_result():
     assert result["label"] == "safe"
     # Orchestrator-tracked usage is the source of truth on the result.
     assert result["usage"] == {"prompt_tokens": 12, "completion_tokens": 3, "n_calls": 1}
+    assert result["telemetry"]["llm_calls"] == 1
+    assert result["telemetry"]["text_response_turns"] == 1
+    assert result["telemetry"]["tool_calls_by_name"] == {}
     assert len(handler_calls) == 1
     # Sent lines: task envelope, then llm_response.
     assert json.loads(sent[0])["_kind"] == "task"
     assert json.loads(sent[1])["_kind"] == "llm_response"
+
+
+def test_protocol_tracks_solve_tool_call_telemetry():
+    container_lines = [
+        json.dumps({"_kind": "llm_request", "id": "r1",
+                    "step_in_task": 1, "messages": []}),
+        json.dumps({"_kind": "result", "result": {"task_id": "t1", "label": "safe"}}),
+    ]
+
+    def handler(env):
+        return {
+            "_kind": "llm_response",
+            "id": env["id"],
+            "ok": True,
+            "content": None,
+            "tool_calls": [
+                {"id": "scan_1", "type": "function",
+                 "function": {"name": "static_scan", "arguments": "{}"}},
+                {"id": "final_1", "type": "function",
+                 "function": {"name": "finalize", "arguments": "{}"}},
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+        }
+
+    result, _ = _drive_protocol(container_lines, {"id": "t1"}, handler)
+
+    assert result["telemetry"]["llm_calls"] == 1
+    assert result["telemetry"]["tool_calls_by_name"] == {
+        "finalize": 1,
+        "static_scan": 1,
+    }
+    assert result["telemetry"]["inspection_tool_calls"] == 1
+    assert result["telemetry"]["used_static_scan"] is True
+    assert result["telemetry"]["immediate_finalize"] is True
 
 
 def test_protocol_returns_error_when_container_closes_early():
@@ -454,6 +491,52 @@ def test_aggregate_per_task_carries_raw_and_error():
     assert out["per_task"][0]["error"] is None
     assert out["per_task"][1]["raw"] is None
     assert out["per_task"][1]["error"] == "host: timeout"
+
+
+def test_aggregate_summarizes_task_telemetry():
+    config = {"model": {"name": "gpt-5.4-mini"}, "pricing": {}}
+    results = [
+        {
+            "task_id": "a",
+            "label": "safe",
+            "expected": "safe",
+            "telemetry": {
+                "llm_calls": 1,
+                "tool_calls_by_name": {"finalize": 1},
+                "inspection_tool_calls": 0,
+                "first_tool": "finalize",
+                "used_finalize_tool": True,
+                "immediate_finalize": True,
+            },
+        },
+        {
+            "task_id": "b",
+            "label": "vulnerable",
+            "expected": "vulnerable",
+            "telemetry": {
+                "llm_calls": 2,
+                "tool_calls_by_name": {"static_scan": 1, "finalize": 1},
+                "inspection_tool_calls": 1,
+                "first_tool": "static_scan",
+                "used_inspection_tool": True,
+                "used_static_scan": True,
+                "used_finalize_tool": True,
+                "immediate_finalize": False,
+            },
+        },
+    ]
+
+    out = orchestrator.aggregate(results, config)
+
+    assert out["telemetry"]["n_tasks"] == 2
+    assert out["telemetry"]["llm_calls_total"] == 3
+    assert out["telemetry"]["tool_calls_by_name"] == {
+        "finalize": 2,
+        "static_scan": 1,
+    }
+    assert out["telemetry"]["tasks_with_static_scan"] == 1
+    assert out["telemetry"]["tasks_finalized_on_step_1"] == 1
+    assert out["telemetry"]["inspection_tool_use_rate"] == pytest.approx(0.5)
 
 
 def test_runner_marker_parser_extracts_start_and_end():
