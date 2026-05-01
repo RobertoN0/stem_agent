@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 import orchestrator
+from growth.manifest import load_mutation_manifest
 
 
 # --- fixtures --------------------------------------------------------------
@@ -102,6 +103,40 @@ def test_bootstrap_can_target_run_scoped_generation_root(seeded_project, basic_c
     assert (gen0 / "agent" / "agent.py").exists()
     assert (gen0 / "tools" / "base.py").exists()
     assert not (seeded_project / "artifacts" / "gen_0").exists()
+
+
+def test_bootstrap_uses_manifest_snapshot_roots(seeded_project, basic_config):
+    (seeded_project / "knowledge").mkdir()
+    (seeded_project / "knowledge" / "strategy.md").write_text("seed\n")
+    manifest = {
+        "snapshot_roots": ["agent", "tools", "knowledge"],
+        "mutable_paths": ["agent/**", "tools/**", "knowledge/**"],
+        "protected_files": ["agent/agent.py", "agent/prompt.txt", "tools/base.py"],
+        "protected_symbols": {},
+    }
+
+    gen0 = orchestrator.bootstrap_gen0(
+        basic_config,
+        seeded_project,
+        artifacts_root=seeded_project / "runs" / "generations",
+        manifest=manifest,
+    )
+
+    assert (gen0 / "knowledge" / "strategy.md").read_text() == "seed\n"
+
+
+def test_snapshot_mutation_manifest_writes_run_copy(seeded_project):
+    run_dir = seeded_project / "artifacts" / "runs" / "run_x"
+    run_dir.mkdir(parents=True)
+    (seeded_project / "mutation_manifest.yaml").write_text(
+        "version: 1\nsnapshot_roots: [agent, tools, knowledge]\n"
+    )
+    manifest = load_mutation_manifest(seeded_project)
+
+    snapshot = orchestrator._snapshot_mutation_manifest(seeded_project, run_dir, manifest)
+
+    assert snapshot == run_dir / "mutation_manifest.snapshot.yaml"
+    assert "knowledge" in snapshot.read_text()
 
 
 def test_snapshot_ignores_python_cache_artifacts(seeded_project, basic_config):
@@ -239,7 +274,7 @@ def test_protocol_passes_model_through_to_handler():
 
 # --- trajectory selection --------------------------------------------------
 
-def test_select_trajectories_failures_first_then_successes():
+def test_select_trajectories_balances_failure_and_success_buckets():
     per_task = [
         {"task_id": "t1", "ok": True, "errored": False, "predicted": "safe", "expected": "safe"},
         {"task_id": "t2", "ok": False, "errored": False, "predicted": "safe", "expected": "vulnerable"},
@@ -250,13 +285,15 @@ def test_select_trajectories_failures_first_then_successes():
     code_map = {f"t{i}": f"code{i}" for i in range(1, 6)}
     sel = orchestrator._select_trajectories(per_task, code_map,
                                              max_failures=3, max_successes=2)
-    # t3 (errored) comes before non-error failures, then t2, t5 alphabetically.
-    # Then up to 2 successes (t1, t4 alphabetically).
     ids = [t["task_id"] for t in sel]
-    assert ids[0] == "t3"  # errored first
-    assert set(ids[1:3]) == {"t2", "t5"}  # other failures
-    assert set(ids[3:]) == {"t1", "t4"}  # successes
-    # Each entry has the input code attached.
+    assert ids == ["t3", "t2", "t5", "t4", "t1"]
+    assert [t["reflection_bucket"] for t in sel] == [
+        "error",
+        "false_negative",
+        "false_positive",
+        "vulnerable_success",
+        "safe_success",
+    ]
     assert all("code" in t for t in sel)
 
 
@@ -269,6 +306,43 @@ def test_select_trajectories_caps_failures_and_successes():
                                              max_failures=3, max_successes=2)
     assert sum(1 for t in sel if not t["ok"]) == 3
     assert sum(1 for t in sel if t["ok"]) == 2
+
+
+def test_select_trajectories_round_robins_false_negative_and_false_positive():
+    per_task = [
+        {"task_id": "fn1", "ok": False, "errored": False,
+         "predicted": "safe", "expected": "vulnerable"},
+        {"task_id": "fn2", "ok": False, "errored": False,
+         "predicted": "safe", "expected": "vulnerable"},
+        {"task_id": "fp1", "ok": False, "errored": False,
+         "predicted": "vulnerable", "expected": "safe"},
+        {"task_id": "fp2", "ok": False, "errored": False,
+         "predicted": "vulnerable", "expected": "safe"},
+    ]
+
+    sel = orchestrator._select_trajectories(per_task, {},
+                                             max_failures=4, max_successes=0)
+
+    assert [t["task_id"] for t in sel] == ["fn1", "fp1", "fn2", "fp2"]
+
+
+def test_select_trajectories_rotates_with_generation_offset():
+    per_task = [
+        {"task_id": "fn1", "ok": False, "errored": False,
+         "predicted": "safe", "expected": "vulnerable"},
+        {"task_id": "fn2", "ok": False, "errored": False,
+         "predicted": "safe", "expected": "vulnerable"},
+        {"task_id": "fp1", "ok": False, "errored": False,
+         "predicted": "vulnerable", "expected": "safe"},
+        {"task_id": "fp2", "ok": False, "errored": False,
+         "predicted": "vulnerable", "expected": "safe"},
+    ]
+
+    sel = orchestrator._select_trajectories(
+        per_task, {}, max_failures=4, max_successes=0, offset=1,
+    )
+
+    assert [t["task_id"] for t in sel] == ["fn2", "fp2", "fn1", "fp1"]
 
 
 def test_rationale_cites_failure_true_and_false():
@@ -348,6 +422,24 @@ def test_read_mutable_files_covers_created_and_deleted_files(tmp_path):
     assert "agent/extra.py" not in after
     assert after["tools/new_tool.py"] == b"NEW = 1\n"
     assert before != after
+
+
+def test_read_mutable_files_uses_manifest_roots(tmp_path):
+    gen_dir = tmp_path
+    (gen_dir / "agent").mkdir()
+    (gen_dir / "agent" / "agent.py").write_text("def solve_task(t): pass\n")
+    (gen_dir / "tools").mkdir()
+    (gen_dir / "tools" / "base.py").write_text("# tools\n")
+    (gen_dir / "knowledge").mkdir()
+    (gen_dir / "knowledge" / "strategy.md").write_text("seed\n")
+    manifest = {
+        "snapshot_roots": ["agent", "tools", "knowledge"],
+        "mutable_paths": ["agent/**", "tools/**", "knowledge/**"],
+    }
+
+    files = orchestrator._read_mutable_files(gen_dir, manifest=manifest)
+
+    assert files["knowledge/strategy.md"] == b"seed\n"
 
 
 def test_aggregate_per_task_carries_raw_and_error():

@@ -1,11 +1,12 @@
 # Agent — local rules
 
 This directory's code (`agent.py`, `prompt.txt`, plus anything future
-generations add) IS what evolves across generations. The orchestrator
-copies this tree into `artifacts/runs/<run_id>/generations/gen_N/` at the
-start of each generation; edits made here become part of gen_0. Edits made
-by the agent at runtime go into
-`artifacts/runs/<run_id>/generations/gen_N+1/agent/` via `growth/apply.py`.
+generations add) is part of what evolves across generations. The current
+manifest also snapshots `tools/` and `knowledge/`. The orchestrator copies
+all `mutation_manifest.yaml` snapshot roots into
+`artifacts/runs/<run_id>/generations/gen_N/` at the start of each generation;
+edits made here become part of gen_0. Edits proposed by reflection are applied
+inside the next candidate snapshot via `growth/apply.py`.
 
 ## Hard rules for agent code
 
@@ -44,5 +45,11 @@ by the agent at runtime go into
    limits and `tools.base` will refuse the path.
 
 5. **The orchestrator is invisible.** You cannot see `orchestrator.py`,
-   `growth/`, `eval/`, or `sandbox/` from inside the sandbox. Don't try
-   to reach for them.
+   `growth/`, `eval/`, `sandbox/`, `data/`, or `artifacts/` from inside the
+   sandbox. Reflection may receive selected read-only summaries of those
+   systems, but runtime agent code cannot import or edit them.
+
+6. **Choose the right mutable surface.** Use `knowledge/` for learned policy,
+   `agent/` for workflow and prompt assembly, and `tools/` for bounded helper
+   capabilities. Keep the seed prompt basic unless changing the generic task
+   framing or output contract is truly the smallest useful edit.

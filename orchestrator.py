@@ -31,6 +31,8 @@ from typing import Callable, Optional
 
 import yaml
 
+from growth.manifest import load_mutation_manifest, snapshot_roots
+
 
 # --- config -----------------------------------------------------------------
 
@@ -53,8 +55,9 @@ def bootstrap_gen0(
     config: dict,
     project_root: Path,
     artifacts_root: Optional[Path] = None,
+    manifest: Optional[dict] = None,
 ) -> Path:
-    """Create a gen_0 snapshot from the live agent/ + tools/ trees if missing.
+    """Create a gen_0 snapshot from the manifest snapshot roots if missing.
 
     Refuses to bootstrap from an empty/missing source tree to prevent silent
     gen_0 generation from nothing.
@@ -65,22 +68,25 @@ def bootstrap_gen0(
     if gen0.exists():
         return gen0
 
-    agent_src = project_root / config["paths"]["agent_dir"]
-    tools_src = project_root / config["paths"]["tools_dir"]
+    if manifest is None:
+        manifest = load_mutation_manifest(project_root)
+    roots = snapshot_roots(manifest)
+    if not roots:
+        roots = [config["paths"]["agent_dir"], config["paths"]["tools_dir"]]
 
-    missing = [str(p.relative_to(project_root))
-               for p in (agent_src, tools_src) if not p.exists()]
+    src_roots = [(root, project_root / root) for root in roots]
+    missing = [root for root, path in src_roots if not path.exists()]
     if missing:
         raise FileNotFoundError(
             f"Cannot bootstrap gen_0: missing source dirs: {', '.join(missing)}. "
-            "Both agent/ and tools/ must exist with seed code before the "
+            "All manifest snapshot roots must exist with seed code before the "
             "orchestrator runs."
         )
 
     gen0.parent.mkdir(parents=True, exist_ok=True)
     gen0.mkdir()
-    shutil.copytree(agent_src, gen0 / "agent", ignore=_snapshot_ignore)
-    shutil.copytree(tools_src, gen0 / "tools", ignore=_snapshot_ignore)
+    for root, src in src_roots:
+        shutil.copytree(src, gen0 / root, ignore=_snapshot_ignore)
     return gen0
 
 
@@ -844,6 +850,11 @@ class ConsoleLogger:
                 f"terminal transcript path={fields.get('path')} "
                 f"command={fields.get('command')}"
             )
+        if event == "mutation_manifest_snapshot":
+            return (
+                f"mutation manifest path={fields.get('path')} "
+                f"roots={fields.get('snapshot_roots')}"
+            )
         if event == "bootstrap_gen0":
             return f"{prefix}bootstrap gen_0 dir={fields.get('gen_dir')}"
         if event == "benchmark_start":
@@ -853,7 +864,7 @@ class ConsoleLogger:
         if event == "eval_start":
             limit = fields.get("limit")
             limit_str = f" limit={limit}" if limit is not None else ""
-            return f"{prefix}eval start split={fields.get('split')} tasks={fields.get('n_tasks', '?')}{limit_str}"
+            return f"\n{prefix}eval start split={fields.get('split')} tasks={fields.get('n_tasks', '?')}{limit_str}"
         if event == "start_generation":
             return (
                 f"{prefix}generation start parent_f1={_fmt_float(fields.get('parent_macro_f1'))} "
@@ -926,11 +937,11 @@ class ConsoleLogger:
             return f"{prefix}smoke fail task={fields.get('task_id')} error={_short(fields.get('error'))}"
         if event == "eval_complete" or event == "benchmark_complete":
             return (
-                f"{prefix}eval done split={fields.get('split')} "
+                f"\n{prefix}eval done split={fields.get('split')} "
                 f"macro_f1={_fmt_float(fields.get('macro_f1'))} "
                 f"accuracy={_fmt_float(fields.get('accuracy'))} "
                 f"errors={fields.get('n_errors')} cost={_fmt_usd(fields.get('cost_usd'))} "
-                f"calls={(fields.get('tokens') or {}).get('n_calls', '?')}"
+                f"calls={(fields.get('tokens') or {}).get('n_calls', '?')}\n"
             )
         if event == "gate_accept":
             return (
@@ -1058,45 +1069,105 @@ class LLMCallLogger:
 
 # --- trajectory selection & proposal helpers --------------------------------
 
-_MUTABLE_DIRS = ("agent", "tools")
-
 
 def _select_trajectories(
     per_task: list,
     task_code_map: dict,
-    max_failures: int = 3,
-    max_successes: int = 2,
+    max_failures: int = 8,
+    max_successes: int = 4,
+    offset: int = 0,
 ) -> list:
-    """Pick up to N failures (errors first, then wrong predictions) and M successes.
+    """Pick a balanced reflection bundle across failure/success modes.
 
     Each returned entry is the per_task dict augmented with the input `code`
-    snippet from the dataset. The orchestrator owns this logic so reflect.py
-    just consumes what it's given.
+    snippet from the dataset and a `reflection_bucket` label. The orchestrator
+    owns this logic so reflect.py just consumes what it's given.
     """
-    failures = []
-    successes = []
+
+    def _bucket(entry: dict) -> str:
+        expected = entry.get("expected")
+        predicted = entry.get("predicted")
+        if entry.get("errored"):
+            return "error"
+        if not entry.get("ok"):
+            if expected == "vulnerable" and predicted == "safe":
+                return "false_negative"
+            if expected == "safe" and predicted == "vulnerable":
+                return "false_positive"
+            if expected == "vulnerable":
+                return "missed_vulnerable"
+            if expected == "safe":
+                return "missed_safe"
+            return "other_failure"
+        if expected == "vulnerable":
+            return "vulnerable_success"
+        if expected == "safe":
+            return "safe_success"
+        return "other_success"
+
+    buckets = {
+        "error": [],
+        "false_negative": [],
+        "false_positive": [],
+        "missed_vulnerable": [],
+        "missed_safe": [],
+        "other_failure": [],
+        "vulnerable_success": [],
+        "safe_success": [],
+        "other_success": [],
+    }
     for t in per_task:
         entry = dict(t)
         entry["code"] = task_code_map.get(t.get("task_id"), "")
-        if t.get("errored") or not t.get("ok"):
-            failures.append(entry)
-        else:
-            successes.append(entry)
+        entry["reflection_bucket"] = _bucket(entry)
+        buckets[entry["reflection_bucket"]].append(entry)
 
-    failures.sort(key=lambda e: (0 if e.get("errored") else 1, str(e.get("task_id"))))
-    successes.sort(key=lambda e: str(e.get("task_id")))
-    return failures[:max_failures] + successes[:max_successes]
+    if offset:
+        for name, bucket in buckets.items():
+            if bucket:
+                shift = offset % len(bucket)
+                buckets[name] = bucket[shift:] + bucket[:shift]
+
+    def _round_robin(names: list[str], limit: int) -> list:
+        selected = []
+        while len(selected) < limit and any(buckets[name] for name in names):
+            for name in names:
+                if len(selected) >= limit:
+                    break
+                if buckets[name]:
+                    selected.append(buckets[name].pop(0))
+        return selected
+
+    failure_order = [
+        "error",
+        "false_negative",
+        "false_positive",
+        "missed_vulnerable",
+        "missed_safe",
+        "other_failure",
+    ]
+    success_order = [
+        "vulnerable_success",
+        "safe_success",
+        "other_success",
+    ]
+    return (
+        _round_robin(failure_order, max_failures)
+        + _round_robin(success_order, max_successes)
+    )
 
 
-def _read_mutable_files(gen_dir: Path) -> dict:
+def _read_mutable_files(gen_dir: Path, manifest: Optional[dict] = None) -> dict:
     """Read bytes for all files the evolving agent may change.
 
-    Multi-edit proposals can create/delete arbitrary files under agent/ and
-    tools/, so no-op detection has to compare the whole mutable tree rather
-    than only agent.py, prompt.txt, and tools/base.py.
+    Multi-edit proposals can create/delete arbitrary files under manifest
+    snapshot roots, so no-op detection has to compare the whole mutable tree
+    rather than only agent.py, prompt.txt, and tools/base.py.
     """
+    if manifest is None:
+        manifest = load_mutation_manifest(gen_dir)
     out = {}
-    for dirname in _MUTABLE_DIRS:
+    for dirname in snapshot_roots(manifest):
         root = gen_dir / dirname
         if not root.exists():
             continue
@@ -1175,6 +1246,29 @@ def _new_run_dir(config: dict, project_root: Path) -> tuple:
     return run_id, run_dir
 
 
+def _snapshot_mutation_manifest(
+    project_root: Path,
+    run_dir: Path,
+    manifest: dict,
+    log_event: Optional[Callable[..., None]] = None,
+) -> Path:
+    """Persist the immutable mutation boundary used for this run."""
+    manifest_path = project_root / "mutation_manifest.yaml"
+    snapshot_path = run_dir / "mutation_manifest.snapshot.yaml"
+    if manifest_path.exists():
+        shutil.copy(manifest_path, snapshot_path)
+    else:
+        with open(snapshot_path, "w") as f:
+            yaml.safe_dump(manifest, f, sort_keys=False)
+    if log_event:
+        log_event(
+            "mutation_manifest_snapshot",
+            path=str(snapshot_path),
+            snapshot_roots=snapshot_roots(manifest),
+        )
+    return snapshot_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stem Agent orchestrator")
     parser.add_argument("--config", default="config.yaml")
@@ -1189,6 +1283,7 @@ def main() -> None:
     if not config_path.is_absolute():
         config_path = project_root / config_path
     config = load_config(config_path)
+    manifest = load_mutation_manifest(project_root)
 
     # Load .env so the OpenAI client picks up OPENAI_API_KEY.
     try:
@@ -1212,6 +1307,7 @@ def main() -> None:
         path=str(transcript_log.path),
         command=shlex.join([sys.executable, *sys.argv]))
     log("start_run", run_id=run_id, config_path=str(config_path))
+    _snapshot_mutation_manifest(project_root, run_dir, manifest, log_event=log)
 
     try:
         from openai import OpenAI
@@ -1231,7 +1327,9 @@ def main() -> None:
             console_logger=progress_log,
             usage_tracker=usage_tracker,
         )
-        gen0 = bootstrap_gen0(config, project_root, artifacts_root=gen_root)
+        gen0 = bootstrap_gen0(
+            config, project_root, artifacts_root=gen_root, manifest=manifest
+        )
         log("bootstrap_gen0", gen_dir=str(gen0))
 
         train_split = _load_split(config, project_root, "train")
@@ -1298,13 +1396,15 @@ def main() -> None:
 
             trajectories = _select_trajectories(
                 parent_train_score.get("per_task", []), train_task_code_map,
+                offset=gen_idx - 1,
             )
             log("trajectories_selected",
                 n_failures=sum(1 for t in trajectories
                                if t.get("errored") or not t.get("ok")),
                 n_successes=sum(1 for t in trajectories
                                 if not t.get("errored") and t.get("ok")),
-                task_ids=[t.get("task_id") for t in trajectories])
+                task_ids=[t.get("task_id") for t in trajectories],
+                buckets=[t.get("reflection_bucket") for t in trajectories])
 
             # Reflection runs at the generation boundary; mark its log entry
             # with generation=null so it's not counted under any one gen.
@@ -1317,6 +1417,8 @@ def main() -> None:
                     llm_handler=handler, config=config,
                     score=parent_train_score, gen_idx=gen_idx - 1,
                     score_split="train",
+                    project_root=project_root,
+                    manifest=manifest,
                 )
             except ValueError as e:
                 log("reflect_parse_error", error=str(e))
@@ -1354,9 +1456,9 @@ def main() -> None:
                     intent=proposal_intent,
                     rationale=proposal_rationale[:300])
 
-            before_files = _read_mutable_files(candidate_dir)
+            before_files = _read_mutable_files(candidate_dir, manifest=manifest)
             try:
-                apply_proposal(proposal, str(candidate_dir))
+                apply_proposal(proposal, str(candidate_dir), manifest=manifest)
             except ValueError as e:
                 log("proposal_invalid",
                     kind=proposal_kind,
@@ -1375,7 +1477,7 @@ def main() -> None:
                 continue
 
             halt_requested = proposal_intent == "halt"
-            after_files = _read_mutable_files(candidate_dir)
+            after_files = _read_mutable_files(candidate_dir, manifest=manifest)
             changed_files = sorted(
                 set(before_files.keys()) ^ set(after_files.keys())
                 | {k for k in before_files.keys() & after_files.keys()

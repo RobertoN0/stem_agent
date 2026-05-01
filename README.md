@@ -9,7 +9,13 @@ PrimeVul.
 
 - `orchestrator.py` is fixed rollback infrastructure; the evolving agent must
   never edit it.
-- The agent may only evolve files under `agent/` and `tools/`.
+- The immutable `mutation_manifest.yaml` defines the snapshot and mutation
+  boundary. Current mutable roots are `agent/`, `tools/`, and `knowledge/`.
+- Kernel paths (`orchestrator.py`, `growth/`, `eval/`, `sandbox/`, tests,
+  configs, data, and artifacts) are not candidate-editable.
+- `tools/base.py` has protected RPC/filesystem symbols; future generations may
+  add helper tools or edit non-protected functions through manifest-checked
+  proposals.
 - Each experiment keeps candidate snapshots under
   `artifacts/runs/<run_id>/generations/gen_N/`; snapshots are append-only
   runtime artifacts and are not committed.
@@ -17,6 +23,9 @@ PrimeVul.
   orchestrator process.
 - Train, validation, and test splits are kept separate: validation gates
   evolution, and test is reserved for final reporting.
+- Reflection runs as a read-only self-inspection loop: it can inspect selected
+  train cases, mutable snapshot files, and filtered repo contracts through
+  tools, then submits a manifest-checked proposal for the next candidate.
 
 ## Prerequisites
 
@@ -86,6 +95,8 @@ timestamped directory under `artifacts/runs/`, containing:
   the terminal, flushed automatically during the run
 - `config.snapshot.yaml` — copy of the active config at run start, so the run
   is reproducible after config drifts
+- `mutation_manifest.snapshot.yaml` — copy of the immutable mutation boundary
+  used for that run
 - `generations/gen_N/` — the full agent/tool snapshot for each generation in
   that run
 
@@ -134,5 +145,7 @@ Tests mock the Docker subprocess, so they run without a Docker daemon.
 
 ## Layout
 
-Core source lives in `orchestrator.py`, `agent/`, `tools/`, `growth/`, `eval/`,
-and `sandbox/`. Local agent-editing rules live in `agent/AGENT.md`.
+Core source lives in `orchestrator.py`, `agent/`, `tools/`, `knowledge/`,
+`growth/`, `eval/`, and `sandbox/`. Local agent-editing rules live in
+`agent/AGENT.md`; the authoritative mutation boundary lives in
+`mutation_manifest.yaml`.

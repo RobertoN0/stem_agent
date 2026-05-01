@@ -14,6 +14,7 @@ from tools.base import llm_call, read_file, run_bash, static_scan, note
 
 
 _PROMPT_PATH = Path(__file__).parent / "prompt.txt"
+_STRATEGY_PATH = Path(__file__).resolve().parents[1] / "knowledge" / "strategy.md"
 _MODEL = "gpt-5.4"
 _MAX_STEPS = 10
 _CWE_RE = re.compile(r"\bCWE-\d+\b", re.IGNORECASE)
@@ -200,6 +201,10 @@ def solve_task(task: dict) -> dict:
     task_id = task.get("id")
 
     system_prompt = _PROMPT_PATH.read_text()
+    if _STRATEGY_PATH.exists():
+        strategy = _STRATEGY_PATH.read_text().strip()
+        if strategy:
+            system_prompt += f"\n\nLearned strategy:\n{strategy}"
     user_content = (
         "Analyze the following code snippet for security vulnerabilities.\n\n"
         f"```\n{code}\n```\n\n"

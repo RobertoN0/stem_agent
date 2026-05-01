@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from growth.apply import apply_proposal
+from growth.manifest import load_mutation_manifest, matches_any, normalize_rel_path
 from growth.reflect import (
     reflect,
     _compute_confusion,
@@ -41,7 +42,14 @@ def gen_dir(tmp_path: Path) -> Path:
         '    """Make an LLM call via the host."""\n'
         "    return {'content': '', 'usage': {}}\n"
     )
+    (tmp_path / "knowledge").mkdir()
+    (tmp_path / "knowledge" / "strategy.md").write_text("# Learned Strategy\n")
     return tmp_path
+
+
+@pytest.fixture
+def phase2_manifest() -> dict:
+    return load_mutation_manifest(Path(__file__).resolve().parent.parent)
 
 
 # --- apply.py: edit_prompt --------------------------------------------------
@@ -119,11 +127,17 @@ def test_add_tool_appends_function(gen_dir):
 
 
 def test_add_tool_rejects_shadowing_existing_name(gen_dir):
-    code = "def read_file(p):\n    return ''\n"
+    tools_path = gen_dir / "tools" / "base.py"
+    tools_path.write_text(
+        tools_path.read_text()
+        + "\n\ndef helper_tool() -> str:\n"
+        + "    return 'old'\n"
+    )
+    code = "def helper_tool() -> str:\n    return ''\n"
     with pytest.raises(ValueError, match="already defined"):
         apply_proposal(
             {"kind": "add_tool",
-             "details": {"name": "read_file", "code": code}},
+             "details": {"name": "helper_tool", "code": code}},
             str(gen_dir),
         )
 
@@ -134,7 +148,7 @@ def test_add_tool_rejects_disallowed_import(gen_dir):
         "    import requests\n"
         "    return requests.get(url).text\n"
     )
-    with pytest.raises(ValueError, match="not in the allowlist"):
+    with pytest.raises(ValueError, match="forbidden module|not in the allowlist"):
         apply_proposal(
             {"kind": "add_tool",
              "details": {"name": "use_requests", "code": code}},
@@ -217,7 +231,7 @@ def test_multi_edit_bundle_rolls_back_when_later_change_invalid(gen_dir):
     original_prompt = (gen_dir / "agent" / "prompt.txt").read_text()
     original_tools = (gen_dir / "tools" / "base.py").read_text()
 
-    with pytest.raises(ValueError, match="not in the allowlist"):
+    with pytest.raises(ValueError, match="forbidden module|not in the allowlist"):
         apply_proposal(
             {
                 "rationale": "task t1",
@@ -245,18 +259,36 @@ def test_multi_edit_bundle_rolls_back_when_later_change_invalid(gen_dir):
 # --- apply.py: edit_tool / delete_tool ------------------------------------
 
 def test_edit_tool_replaces_existing_function(gen_dir):
+    tools_path = gen_dir / "tools" / "base.py"
+    tools_path.write_text(
+        tools_path.read_text()
+        + "\n\ndef helper_tool() -> str:\n"
+        + "    return 'old'\n"
+    )
     code = (
-        "def read_file(path: str) -> str:\n"
-        '    """Read a file with a marker."""\n'
-        "    return 'patched:' + path\n"
+        "def helper_tool() -> str:\n"
+        '    """Return a marker."""\n'
+        "    return 'patched'\n"
     )
     apply_proposal(
-        {"kind": "edit_tool", "details": {"name": "read_file", "code": code}},
+        {"kind": "edit_tool", "details": {"name": "helper_tool", "code": code}},
         str(gen_dir),
     )
     new_src = (gen_dir / "tools" / "base.py").read_text()
-    assert "patched:" in new_src
-    assert "open(path).read()" not in new_src
+    assert "return 'patched'" in new_src
+    assert "return 'old'" not in new_src
+
+
+def test_edit_tool_rejects_protected_core_tool(gen_dir):
+    code = (
+        "def read_file(path: str) -> str:\n"
+        "    return 'patched:' + path\n"
+    )
+    with pytest.raises(ValueError, match="protected symbol"):
+        apply_proposal(
+            {"kind": "edit_tool", "details": {"name": "read_file", "code": code}},
+            str(gen_dir),
+        )
 
 
 def test_edit_tool_rejects_missing_function(gen_dir):
@@ -292,18 +324,18 @@ def test_delete_tool_rejects_protected_core_tool(gen_dir):
         )
 
 
-def test_delete_tool_rejects_static_scan_core_tool(gen_dir):
+def test_delete_tool_can_remove_static_scan_when_present(gen_dir):
     tools_path = gen_dir / "tools" / "base.py"
     tools_path.write_text(
         tools_path.read_text()
         + "\n\ndef static_scan(code: str):\n    return {}\n"
     )
 
-    with pytest.raises(ValueError, match="protected core tool"):
-        apply_proposal(
-            {"kind": "delete_tool", "details": {"name": "static_scan"}},
-            str(gen_dir),
-        )
+    apply_proposal(
+        {"kind": "delete_tool", "details": {"name": "static_scan"}},
+        str(gen_dir),
+    )
+    assert "def static_scan" not in tools_path.read_text()
 
 
 # --- apply.py: create_file / delete_file ----------------------------------
@@ -315,6 +347,26 @@ def test_create_file_creates_nested_file_under_agent(gen_dir):
         str(gen_dir),
     )
     assert (gen_dir / "agent" / "heuristics" / "rules.py").read_text() == "RULES = []\n"
+
+
+def test_create_file_allows_knowledge_under_manifest(gen_dir, phase2_manifest):
+    apply_proposal(
+        {"kind": "create_file",
+         "details": {"path": "knowledge/notes.md", "content": "learned later\n"}},
+        str(gen_dir),
+        manifest=phase2_manifest,
+    )
+    assert (gen_dir / "knowledge" / "notes.md").read_text() == "learned later\n"
+
+
+def test_create_file_rejects_kernel_and_data_paths(gen_dir, phase2_manifest):
+    for path in ("orchestrator.py", "data/leak.txt", "artifacts/run.txt"):
+        with pytest.raises(ValueError, match="not mutable"):
+            apply_proposal(
+                {"kind": "create_file", "details": {"path": path, "content": "x"}},
+                str(gen_dir),
+                manifest=phase2_manifest,
+            )
 
 
 def test_create_file_rejects_path_escape(gen_dir):
@@ -344,6 +396,57 @@ def test_delete_file_rejects_protected_file(gen_dir):
         )
 
 
+def test_replace_file_updates_knowledge_under_manifest(gen_dir, phase2_manifest):
+    apply_proposal(
+        {"kind": "replace_file",
+         "details": {"path": "knowledge/strategy.md", "content": "prefer evidence\n"}},
+        str(gen_dir),
+        manifest=phase2_manifest,
+    )
+    assert (gen_dir / "knowledge" / "strategy.md").read_text() == "prefer evidence\n"
+
+
+def test_replace_file_rejects_tools_base_whole_file(gen_dir, phase2_manifest):
+    with pytest.raises(ValueError, match="protected symbols"):
+        apply_proposal(
+            {"kind": "replace_file",
+             "details": {"path": "tools/base.py", "content": "# replaced\n"}},
+            str(gen_dir),
+            manifest=phase2_manifest,
+        )
+
+
+def test_add_and_replace_function_work_on_mutable_python_file(gen_dir, phase2_manifest):
+    (gen_dir / "agent" / "helpers.py").write_text(
+        "def classify_hint(src: str) -> str:\n"
+        "    return 'old'\n"
+    )
+    apply_proposal(
+        {"kind": "add_function",
+         "details": {
+             "path": "agent/helpers.py",
+             "name": "count_chars",
+             "code": "def count_chars(src: str) -> int:\n    return len(src)\n",
+         }},
+        str(gen_dir),
+        manifest=phase2_manifest,
+    )
+    apply_proposal(
+        {"kind": "replace_function",
+         "details": {
+             "path": "agent/helpers.py",
+             "name": "classify_hint",
+             "code": "def classify_hint(src: str) -> str:\n    return 'new'\n",
+         }},
+        str(gen_dir),
+        manifest=phase2_manifest,
+    )
+    source = (gen_dir / "agent" / "helpers.py").read_text()
+    assert "def count_chars" in source
+    assert "return 'new'" in source
+    assert "return 'old'" not in source
+
+
 # --- apply.py: top-level rejection -----------------------------------------
 
 def test_unknown_kind_raises(gen_dir):
@@ -357,6 +460,18 @@ def test_unknown_kind_raises(gen_dir):
 def test_proposal_must_be_dict(gen_dir):
     with pytest.raises(ValueError, match="proposal must be a dict"):
         apply_proposal("not a dict", str(gen_dir))
+
+
+def test_manifest_helpers_preserve_dotfile_paths():
+    manifest = load_mutation_manifest(Path(__file__).resolve().parent.parent)
+    deny = manifest["reflection_context"]["deny_paths"]
+
+    assert normalize_rel_path(".env") == ".env"
+    assert matches_any(".env", deny)
+    assert matches_any(".codex", deny)
+    assert matches_any(".codex/config", deny)
+    assert matches_any(".git/config", deny)
+    assert matches_any(".venv/bin/python", deny)
 
 
 # --- reflect.py: helpers ---------------------------------------------------
@@ -389,7 +504,7 @@ def test_extract_tools_api_pulls_signatures(gen_dir):
     assert "def llm_call" in api
 
 
-def test_build_messages_includes_failures_and_code(gen_dir):
+def test_build_messages_includes_balanced_case_index_and_tool_guidance(gen_dir):
     score = {
         "per_task": [
             {"task_id": "t1", "expected": "vulnerable",
@@ -410,15 +525,22 @@ def test_build_messages_includes_failures_and_code(gen_dir):
     )
     user = messages[1]["content"]
     assert "task_id=t1" in user
-    assert "gets(buf)" in user
+    assert "bucket=" in user
     assert "FAILURE 1" in user
+    assert "read_train_case" in user
+    assert "read_mutable_file" in user
+    assert "propose_changes" in user
     assert "edit_prompt" in user
     assert "edit_solve_loop" in user
     assert "add_tool" in user
     assert "edit_tool" in user
     assert "create_file" in user
+    assert "replace_file" in user
+    assert "add_function" in user
+    assert "replace_function" in user
     assert "\"intent\": \"iterate\"" in user
     assert "\"changes\"" in user
+    assert "gets(buf)" not in user
 
 
 # --- reflect.py: handler interaction ---------------------------------------
@@ -434,6 +556,38 @@ def _fake_handler_returning(content: str, calls: list | None = None):
     return handler
 
 
+def _tool_call(name: str, args: dict, call_id: str = "call_1") -> dict:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(args)},
+    }
+
+
+def _fake_reflection_tool_handler(proposal: dict, calls: list | None = None):
+    def handler(env):
+        if calls is not None:
+            calls.append(env)
+        if len(calls or []) == 1:
+            return {
+                "_kind": "llm_response",
+                "id": env["id"],
+                "ok": True,
+                "content": None,
+                "tool_calls": [_tool_call("list_mutable_files", {}, "inspect_1")],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+        return {
+            "_kind": "llm_response",
+            "id": env["id"],
+            "ok": True,
+            "content": None,
+            "tool_calls": [_tool_call("propose_changes", proposal, "proposal_1")],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+    return handler
+
+
 def _fake_handler_failing():
     def handler(env):
         return {"_kind": "llm_response", "id": env["id"],
@@ -442,15 +596,15 @@ def _fake_handler_failing():
 
 
 def test_reflect_returns_parsed_proposal(gen_dir):
-    proposal_json = json.dumps({
+    proposal = {
         "rationale": "task t1 showed prompt confusion",
         "intent": "iterate",
         "changes": [
             {"kind": "edit_prompt", "details": {"content": "new prompt"}},
         ],
-    })
+    }
     calls = []
-    handler = _fake_handler_returning(proposal_json, calls=calls)
+    handler = _fake_reflection_tool_handler(proposal, calls=calls)
 
     out = reflect(
         trajectories=[],
@@ -465,10 +619,15 @@ def test_reflect_returns_parsed_proposal(gen_dir):
     assert out["changes"][0]["kind"] == "edit_prompt"
     assert out["changes"][0]["details"]["content"] == "new prompt"
 
-    # The envelope must carry purpose=reflect, task_id=None, response_format=json_object
+    # The envelope must carry purpose=reflect, task_id=None, and reflection tools.
     assert calls[0]["purpose"] == "reflect"
     assert calls[0]["task_id"] is None
-    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["response_format"] is None
+    assert {t["function"]["name"] for t in calls[0]["tools"]} >= {
+        "list_mutable_files", "read_mutable_file", "read_train_case",
+        "read_repo_context", "read_tool_api", "propose_changes",
+    }
+    assert any(m["role"] == "tool" for m in calls[1]["messages"])
 
 
 def test_reflect_returns_none_when_handler_fails(gen_dir):
@@ -482,20 +641,19 @@ def test_reflect_returns_none_when_handler_fails(gen_dir):
     assert out is None
 
 
-def test_reflect_retries_once_on_bad_json(gen_dir):
-    """First response is garbage; second must be valid JSON. Should succeed."""
+def test_reflect_accepts_legacy_plain_json_after_tool_loop_exhaustion(gen_dir):
+    """Plain JSON remains accepted for compatibility, though tools are preferred."""
     valid = json.dumps({
         "rationale": "task t1",
         "intent": "iterate",
         "changes": [{"kind": "edit_prompt", "details": {"content": "x"}}],
     })
-    responses = ["this is not json", valid]
     calls = []
 
     def handler(env):
         calls.append(env)
         return {"_kind": "llm_response", "id": env["id"],
-                "ok": True, "content": responses[len(calls) - 1],
+                "ok": True, "content": valid,
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
     out = reflect(
@@ -506,7 +664,7 @@ def test_reflect_retries_once_on_bad_json(gen_dir):
         score={"per_task": []},
     )
     assert out["changes"][0]["kind"] == "edit_prompt"
-    assert len(calls) == 2  # original + one retry
+    assert len(calls) == 6
 
 
 def test_reflect_wraps_legacy_single_edit_proposal(gen_dir):
@@ -543,6 +701,24 @@ def test_parse_proposal_accepts_halt_with_empty_changes():
     }))
     assert out["intent"] == "halt"
     assert out["changes"] == []
+
+
+def test_parse_proposal_accepts_new_file_and_function_kinds():
+    out = _parse_proposal(json.dumps({
+        "rationale": "task t1",
+        "intent": "iterate",
+        "changes": [
+            {"kind": "replace_file",
+             "details": {"path": "knowledge/strategy.md", "content": "x"}},
+            {"kind": "add_function",
+             "details": {"path": "agent/helpers.py", "name": "h", "code": "def h(): pass"}},
+            {"kind": "replace_function",
+             "details": {"path": "tools/base.py", "name": "static_scan", "code": "def static_scan(): pass"}},
+        ],
+    }))
+    assert [c["kind"] for c in out["changes"]] == [
+        "replace_file", "add_function", "replace_function",
+    ]
 
 
 def test_parse_proposal_rejects_bad_change_details():
