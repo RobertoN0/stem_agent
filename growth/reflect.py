@@ -274,12 +274,19 @@ def _format_trajectory_summary(traj: dict, n: int, kind: str) -> str:
     tool_str = ", ".join(f"{name}={count}" for name, count in sorted(tools.items()))
     if not tool_str:
         tool_str = "none"
+    direct_helpers = telemetry.get("direct_helper_calls_by_name") or {}
+    direct_str = ", ".join(
+        f"{name}={count}" for name, count in sorted(direct_helpers.items())
+    )
+    if not direct_str:
+        direct_str = "none"
     raw = (traj.get("raw") or "").strip().replace("\n", " ")
     raw = raw[:240] + ("..." if len(raw) > 240 else "")
     return (
         f"[{kind} {n}] task_id={task_id} expected={expected} "
         f"predicted={predicted} bucket={bucket} "
-        f"llm_calls={telemetry.get('llm_calls', '?')} tools={tool_str} "
+        f"llm_calls={telemetry.get('llm_calls', '?')} "
+        f"llm_tools={tool_str} direct_helpers={direct_str} "
         f"raw={raw or '(no raw output)'}"
     )
 
@@ -292,6 +299,8 @@ def _format_self_observation(self_observation: Optional[dict]) -> str:
     source_split = self_observation.get("source_split") or "train"
     tool_counts = solve.get("tool_calls_by_name") or {}
     first_tool_counts = solve.get("first_tool_counts") or {}
+    runtime_helper_counts = solve.get("runtime_helper_calls_by_name") or {}
+    direct_helper_counts = solve.get("direct_helper_calls_by_name") or {}
     recent = self_observation.get("recent_proposals") or []
 
     def _counts_text(counts: dict) -> str:
@@ -303,11 +312,12 @@ def _format_self_observation(self_observation: Optional[dict]) -> str:
         f"Source split: {source_split} only. This contains behavior telemetry, "
         "not validation/test task contents.",
         (
-            "Telemetry scope: tool-use counts here are LLM-requested tool calls "
-            "observed by the orchestrator gateway. Direct helper calls inside "
-            "mutable code, such as agent.py precomputing static_scan before "
-            "llm_call, are not counted here; inspect agent.py before concluding "
-            "the workflow uses no tools."
+            "Telemetry scope: LLM-requested tool calls are model tool calls "
+            "observed by the orchestrator gateway. Runtime helper calls are "
+            "direct calls made inside mutable code before an llm_call, such as "
+            "agent.py precomputing static_scan. Direct helper calls are the "
+            "runtime helper calls not explained by matching LLM-requested tool "
+            "calls."
         ),
         (
             "Solve calls: "
@@ -317,18 +327,31 @@ def _format_self_observation(self_observation: Optional[dict]) -> str:
             f"max_llm_calls_per_task={solve.get('max_llm_calls_per_task', 0)}"
         ),
         (
-            "Tool use: "
+            "LLM-requested tool use: "
             f"tool_calls_total={solve.get('tool_calls_total', 0)}, "
             f"inspection_tool_calls_total={solve.get('inspection_tool_calls_total', 0)}, "
             f"tool_use_rate={solve.get('tool_use_rate', 0.0):.2f}, "
             f"inspection_tool_use_rate={solve.get('inspection_tool_use_rate', 0.0):.2f}, "
             f"immediate_finalize_rate={solve.get('immediate_finalize_rate', 0.0):.2f}"
         ),
-        f"Tool counts by name: {_counts_text(tool_counts)}",
-        f"First tool counts: {_counts_text(first_tool_counts)}",
+        f"LLM tool counts by name: {_counts_text(tool_counts)}",
+        f"First LLM tool counts: {_counts_text(first_tool_counts)}",
+        (
+            "Runtime helper use: "
+            f"helper_calls_total={solve.get('runtime_helper_calls_total', 0)}, "
+            f"helper_use_rate={solve.get('runtime_helper_use_rate', 0.0):.2f}, "
+            f"inspection_helper_use_rate={solve.get('runtime_inspection_helper_use_rate', 0.0):.2f}, "
+            f"direct_helper_calls_total={solve.get('direct_helper_calls_total', 0)}, "
+            f"direct_helper_use_rate={solve.get('direct_helper_use_rate', 0.0):.2f}, "
+            f"direct_inspection_helper_use_rate={solve.get('direct_inspection_helper_use_rate', 0.0):.2f}"
+        ),
+        f"Runtime helper counts by name: {_counts_text(runtime_helper_counts)}",
+        f"Direct helper counts by name: {_counts_text(direct_helper_counts)}",
         (
             "Task counts: "
-            f"static_scan={solve.get('tasks_with_static_scan', 0)}, "
+            f"llm_static_scan={solve.get('tasks_with_static_scan', 0)}, "
+            f"runtime_static_scan={solve.get('tasks_with_runtime_static_scan', 0)}, "
+            f"direct_static_scan={solve.get('tasks_with_direct_static_scan', 0)}, "
             f"read_file={solve.get('tasks_with_read_file', 0)}, "
             f"note={solve.get('tasks_with_note', 0)}, "
             f"finalize_tool={solve.get('tasks_with_finalize_tool', 0)}, "

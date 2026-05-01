@@ -32,6 +32,34 @@ _RPC_RECV_LINE = None
 _TASK_ID = None
 _STEP = 0
 _DEFAULT_PURPOSE = "solve_task"
+_RUNTIME_HELPER_CALLS = {}
+_RUNTIME_HELPER_ERRORS = {}
+
+
+def _reset_runtime_helper_telemetry() -> None:
+    """Reset per-task direct helper-call telemetry."""
+    _RUNTIME_HELPER_CALLS.clear()
+    _RUNTIME_HELPER_ERRORS.clear()
+
+
+def _bump_runtime_helper_count(bucket: dict, name: str) -> None:
+    bucket[name] = int(bucket.get(name, 0)) + 1
+
+
+def _record_runtime_helper_call(name: str) -> None:
+    _bump_runtime_helper_count(_RUNTIME_HELPER_CALLS, name)
+
+
+def _record_runtime_helper_error(name: str) -> None:
+    _bump_runtime_helper_count(_RUNTIME_HELPER_ERRORS, name)
+
+
+def _runtime_helper_telemetry_snapshot() -> dict:
+    """Return cumulative per-task helper calls made inside the sandbox."""
+    return {
+        "helper_calls_by_name": dict(sorted(_RUNTIME_HELPER_CALLS.items())),
+        "helper_errors_by_name": dict(sorted(_RUNTIME_HELPER_ERRORS.items())),
+    }
 
 
 def _set_rpc_channels(send_line, recv_line) -> None:
@@ -48,6 +76,7 @@ def _set_task_context(task_id, default_purpose: str = "solve_task") -> None:
     _TASK_ID = task_id
     _STEP = 0
     _DEFAULT_PURPOSE = default_purpose
+    _reset_runtime_helper_telemetry()
 
 
 def _safe_path(path, *, write: bool) -> Path:
@@ -62,24 +91,40 @@ def _safe_path(path, *, write: bool) -> Path:
 
 
 def read_file(path: str) -> str:
-    return _safe_path(path, write=False).read_text()
+    _record_runtime_helper_call("read_file")
+    try:
+        return _safe_path(path, write=False).read_text()
+    except Exception:
+        _record_runtime_helper_error("read_file")
+        raise
 
 
 def write_file(path: str, content: str) -> None:
-    p = _safe_path(path, write=True)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
+    _record_runtime_helper_call("write_file")
+    try:
+        p = _safe_path(path, write=True)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    except Exception:
+        _record_runtime_helper_error("write_file")
+        raise
 
 
 def list_dir(path: str) -> list:
-    p = _safe_path(path, write=False)
-    return sorted(_os.listdir(p))
+    _record_runtime_helper_call("list_dir")
+    try:
+        p = _safe_path(path, write=False)
+        return sorted(_os.listdir(p))
+    except Exception:
+        _record_runtime_helper_error("list_dir")
+        raise
 
 
 def run_bash(cmd: str, timeout: int = 30) -> dict:
     """Run a shell command in /work. Filesystem-level restrictions are
     enforced by the Docker mount (/agent is RO at the kernel level), so we
     don't try to validate the command itself."""
+    _record_runtime_helper_call("run_bash")
     try:
         proc = _subprocess.run(
             cmd, shell=True, capture_output=True, text=True,
@@ -203,29 +248,39 @@ def static_scan(
     work_dir: str = "/work/static_scan",
 ) -> dict:
     """Run a bounded, structured static scan over a code snippet."""
-    code = code or ""
+    _record_runtime_helper_call("static_scan")
     try:
-        timeout_s = max(1, min(int(timeout), 8))
-    except (TypeError, ValueError):
-        timeout_s = 5
-    scan_code = code[:50000]
-    lang = _normalize_language(scan_code, language)
-    result = {
-        "language": lang,
-        "truncated": len(code) > len(scan_code),
-        "heuristic_findings": _heuristic_scan(scan_code, lang),
-        "external": {"status": "skipped", "reason": "run_external is false"},
-    }
-    if run_external:
-        result["external"] = _external_scan(scan_code, lang, timeout_s, work_dir)
-    return result
+        code = code or ""
+        try:
+            timeout_s = max(1, min(int(timeout), 8))
+        except (TypeError, ValueError):
+            timeout_s = 5
+        scan_code = code[:50000]
+        lang = _normalize_language(scan_code, language)
+        result = {
+            "language": lang,
+            "truncated": len(code) > len(scan_code),
+            "heuristic_findings": _heuristic_scan(scan_code, lang),
+            "external": {"status": "skipped", "reason": "run_external is false"},
+        }
+        if run_external:
+            result["external"] = _external_scan(scan_code, lang, timeout_s, work_dir)
+        return result
+    except Exception:
+        _record_runtime_helper_error("static_scan")
+        raise
 
 
 def note(text: str) -> None:
     """Append a timestamped note to /work/notes.txt for cross-step scratch."""
-    ts = _dt.datetime.now(_dt.timezone.utc).isoformat()
-    with open("/work/notes.txt", "a") as f:
-        f.write(f"[{ts}] {text}\n")
+    _record_runtime_helper_call("note")
+    try:
+        ts = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        with open("/work/notes.txt", "a") as f:
+            f.write(f"[{ts}] {text}\n")
+    except Exception:
+        _record_runtime_helper_error("note")
+        raise
 
 
 def llm_call(
@@ -270,6 +325,7 @@ def llm_call(
         "task_id": _TASK_ID,
         "purpose": purpose if purpose is not None else _DEFAULT_PURPOSE,
         "step_in_task": _STEP,
+        "runtime_helper_telemetry": _runtime_helper_telemetry_snapshot(),
     }
     _RPC_SEND_LINE(_json.dumps(envelope))
 

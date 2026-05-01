@@ -533,10 +533,20 @@ def test_build_messages_includes_balanced_case_index_and_tool_guidance(gen_dir):
                 "inspection_tool_calls_total": 0,
                 "tool_use_rate": 1.0,
                 "inspection_tool_use_rate": 0.0,
+                "runtime_helper_calls_total": 1,
+                "runtime_helper_use_rate": 1.0,
+                "runtime_inspection_helper_use_rate": 1.0,
+                "direct_helper_calls_total": 1,
+                "direct_helper_use_rate": 1.0,
+                "direct_inspection_helper_use_rate": 1.0,
                 "immediate_finalize_rate": 1.0,
                 "tool_calls_by_name": {"finalize": 1},
                 "first_tool_counts": {"finalize": 1},
+                "runtime_helper_calls_by_name": {"static_scan": 1},
+                "direct_helper_calls_by_name": {"static_scan": 1},
                 "tasks_with_static_scan": 0,
+                "tasks_with_runtime_static_scan": 1,
+                "tasks_with_direct_static_scan": 1,
                 "tasks_with_read_file": 0,
                 "tasks_with_note": 0,
                 "tasks_with_finalize_tool": 1,
@@ -567,8 +577,10 @@ def test_build_messages_includes_balanced_case_index_and_tool_guidance(gen_dir):
     assert "\"changes\"" in user
     assert "TRAIN-ONLY SELF-OBSERVATION" in user
     assert "LLM-requested tool calls" in user
-    assert "Direct helper calls inside mutable code" in user
-    assert "Tool counts by name: finalize=1" in user
+    assert "Runtime helper calls are direct calls made inside mutable code" in user
+    assert "LLM tool counts by name: finalize=1" in user
+    assert "Runtime helper counts by name: static_scan=1" in user
+    assert "Direct helper counts by name: static_scan=1" in user
     assert "outcome=rejected" in user
     assert "changed_files=agent/prompt.txt" in user
     assert "gets(buf)" not in user

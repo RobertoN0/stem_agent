@@ -275,6 +275,75 @@ def test_protocol_tracks_solve_tool_call_telemetry():
     assert result["telemetry"]["immediate_finalize"] is True
 
 
+def test_protocol_tracks_runtime_helper_telemetry_from_llm_request():
+    container_lines = [
+        json.dumps({
+            "_kind": "llm_request",
+            "id": "r1",
+            "step_in_task": 1,
+            "messages": [],
+            "runtime_helper_telemetry": {
+                "helper_calls_by_name": {"static_scan": 1},
+                "helper_errors_by_name": {},
+            },
+        }),
+        json.dumps({"_kind": "result", "result": {"task_id": "t1", "label": "safe"}}),
+    ]
+
+    def handler(env):
+        return {
+            "_kind": "llm_response",
+            "id": env["id"],
+            "ok": True,
+            "content": None,
+            "tool_calls": [
+                {"id": "final_1", "type": "function",
+                 "function": {"name": "finalize", "arguments": "{}"}},
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+        }
+
+    result, _ = _drive_protocol(container_lines, {"id": "t1"}, handler)
+
+    assert result["telemetry"]["runtime_helper_calls_by_name"] == {"static_scan": 1}
+    assert result["telemetry"]["direct_helper_calls_by_name"] == {"static_scan": 1}
+    assert result["telemetry"]["used_direct_static_scan"] is True
+
+
+def test_protocol_subtracts_llm_requested_tool_from_direct_helper_counts():
+    container_lines = [
+        json.dumps({
+            "_kind": "llm_request",
+            "id": "r1",
+            "step_in_task": 1,
+            "messages": [],
+            "runtime_helper_telemetry": {
+                "helper_calls_by_name": {"static_scan": 1},
+                "helper_errors_by_name": {},
+            },
+        }),
+        json.dumps({"_kind": "result", "result": {"task_id": "t1", "label": "safe"}}),
+    ]
+
+    def handler(env):
+        return {
+            "_kind": "llm_response",
+            "id": env["id"],
+            "ok": True,
+            "content": None,
+            "tool_calls": [
+                {"id": "scan_1", "type": "function",
+                 "function": {"name": "static_scan", "arguments": "{}"}},
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+        }
+
+    result, _ = _drive_protocol(container_lines, {"id": "t1"}, handler)
+
+    assert result["telemetry"]["runtime_helper_calls_by_name"] == {"static_scan": 1}
+    assert result["telemetry"]["direct_helper_calls_by_name"] == {}
+
+
 def test_protocol_returns_error_when_container_closes_early():
     """If the container closes stdout before sending a result, surface an error."""
     container_lines = []  # empty: recv_line returns None immediately
@@ -507,6 +576,14 @@ def test_aggregate_summarizes_task_telemetry():
                 "first_tool": "finalize",
                 "used_finalize_tool": True,
                 "immediate_finalize": True,
+                "runtime_helper_calls_by_name": {"static_scan": 1},
+                "direct_helper_calls_by_name": {"static_scan": 1},
+                "used_runtime_helper": True,
+                "used_runtime_inspection_helper": True,
+                "used_runtime_static_scan": True,
+                "used_direct_helper": True,
+                "used_direct_inspection_helper": True,
+                "used_direct_static_scan": True,
             },
         },
         {
@@ -522,6 +599,11 @@ def test_aggregate_summarizes_task_telemetry():
                 "used_static_scan": True,
                 "used_finalize_tool": True,
                 "immediate_finalize": False,
+                "runtime_helper_calls_by_name": {"static_scan": 1},
+                "direct_helper_calls_by_name": {},
+                "used_runtime_helper": True,
+                "used_runtime_inspection_helper": True,
+                "used_runtime_static_scan": True,
             },
         },
     ]
@@ -535,8 +617,14 @@ def test_aggregate_summarizes_task_telemetry():
         "static_scan": 1,
     }
     assert out["telemetry"]["tasks_with_static_scan"] == 1
+    assert out["telemetry"]["runtime_helper_calls_by_name"] == {"static_scan": 2}
+    assert out["telemetry"]["direct_helper_calls_by_name"] == {"static_scan": 1}
+    assert out["telemetry"]["tasks_with_runtime_static_scan"] == 2
+    assert out["telemetry"]["tasks_with_direct_static_scan"] == 1
     assert out["telemetry"]["tasks_finalized_on_step_1"] == 1
     assert out["telemetry"]["inspection_tool_use_rate"] == pytest.approx(0.5)
+    assert out["telemetry"]["runtime_inspection_helper_use_rate"] == pytest.approx(1.0)
+    assert out["telemetry"]["direct_inspection_helper_use_rate"] == pytest.approx(0.5)
 
 
 def test_runner_marker_parser_extracts_start_and_end():

@@ -189,9 +189,50 @@ def _record_task_llm_response(telemetry: dict, response_env: dict, step_in_task)
             telemetry["finalized_on_step"] = step
 
 
-def _finalize_task_telemetry(telemetry: dict) -> dict:
+def _clean_count_dict(value) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for key, count in value.items():
+        if not isinstance(key, str) or not key:
+            continue
+        try:
+            n = int(count)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out[key] = n
+    return dict(sorted(out.items()))
+
+
+def _runtime_helper_snapshot(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "helper_calls_by_name": _clean_count_dict(value.get("helper_calls_by_name")),
+        "helper_errors_by_name": _clean_count_dict(value.get("helper_errors_by_name")),
+    }
+
+
+def _direct_helper_counts(runtime_counts: dict, llm_tool_counts: dict) -> dict:
+    direct = {}
+    for name, count in runtime_counts.items():
+        extra = int(count) - int(llm_tool_counts.get(name, 0))
+        if extra > 0:
+            direct[name] = extra
+    return dict(sorted(direct.items()))
+
+
+def _finalize_task_telemetry(
+    telemetry: dict,
+    runtime_helper_telemetry: Optional[dict] = None,
+) -> dict:
     """Return a JSON-friendly task telemetry record."""
     counts = dict(sorted((telemetry.get("tool_calls_by_name") or {}).items()))
+    runtime = _runtime_helper_snapshot(runtime_helper_telemetry)
+    runtime_counts = runtime.get("helper_calls_by_name", {})
+    runtime_errors = runtime.get("helper_errors_by_name", {})
+    direct_counts = _direct_helper_counts(runtime_counts, counts)
     finalized_on_step = telemetry.get("finalized_on_step")
     out = {
         "llm_calls": int(telemetry.get("llm_calls", 0)),
@@ -207,6 +248,22 @@ def _finalize_task_telemetry(telemetry: dict) -> dict:
         "used_read_file": counts.get("read_file", 0) > 0,
         "used_note": counts.get("note", 0) > 0,
         "used_finalize_tool": counts.get("finalize", 0) > 0,
+        "runtime_helper_calls_by_name": runtime_counts,
+        "runtime_helper_errors_by_name": runtime_errors,
+        "runtime_helper_calls_total": sum(runtime_counts.values()),
+        "runtime_helper_errors_total": sum(runtime_errors.values()),
+        "used_runtime_helper": bool(runtime_counts),
+        "used_runtime_inspection_helper": any(
+            runtime_counts.get(name, 0) > 0 for name in _SOLVE_INSPECTION_TOOLS
+        ),
+        "direct_helper_calls_by_name": direct_counts,
+        "direct_helper_calls_total": sum(direct_counts.values()),
+        "used_direct_helper": bool(direct_counts),
+        "used_direct_inspection_helper": any(
+            direct_counts.get(name, 0) > 0 for name in _SOLVE_INSPECTION_TOOLS
+        ),
+        "used_direct_static_scan": direct_counts.get("static_scan", 0) > 0,
+        "used_runtime_static_scan": runtime_counts.get("static_scan", 0) > 0,
     }
     return out
 
@@ -221,8 +278,20 @@ def _aggregate_task_telemetry(results: list) -> dict:
         "inspection_tool_calls_total": 0,
         "tool_calls_by_name": {},
         "first_tool_counts": {},
+        "runtime_helper_calls_total": 0,
+        "runtime_helper_errors_total": 0,
+        "runtime_helper_calls_by_name": {},
+        "runtime_helper_errors_by_name": {},
+        "direct_helper_calls_total": 0,
+        "direct_helper_calls_by_name": {},
         "tasks_with_any_tool_call": 0,
         "tasks_with_inspection_tool": 0,
+        "tasks_with_runtime_helper": 0,
+        "tasks_with_runtime_inspection_helper": 0,
+        "tasks_with_runtime_static_scan": 0,
+        "tasks_with_direct_helper": 0,
+        "tasks_with_direct_inspection_helper": 0,
+        "tasks_with_direct_static_scan": 0,
         "tasks_with_static_scan": 0,
         "tasks_with_read_file": 0,
         "tasks_with_note": 0,
@@ -236,16 +305,37 @@ def _aggregate_task_telemetry(results: list) -> dict:
         tel = result.get("telemetry") or {}
         llm_calls = int(tel.get("llm_calls", 0))
         counts = tel.get("tool_calls_by_name") or {}
+        runtime_counts = tel.get("runtime_helper_calls_by_name") or {}
+        runtime_errors = tel.get("runtime_helper_errors_by_name") or {}
+        direct_counts = tel.get("direct_helper_calls_by_name") or {}
         tool_calls = sum(int(v) for v in counts.values())
+        runtime_calls = sum(int(v) for v in runtime_counts.values())
+        runtime_error_calls = sum(int(v) for v in runtime_errors.values())
+        direct_calls = sum(int(v) for v in direct_counts.values())
         summary["llm_calls_total"] += llm_calls
         summary["tool_calls_total"] += tool_calls
         summary["inspection_tool_calls_total"] += int(tel.get("inspection_tool_calls", 0))
+        summary["runtime_helper_calls_total"] += runtime_calls
+        summary["runtime_helper_errors_total"] += runtime_error_calls
+        summary["direct_helper_calls_total"] += direct_calls
         summary["max_llm_calls_per_task"] = max(
             summary["max_llm_calls_per_task"], llm_calls
         )
         for name, count in counts.items():
             summary["tool_calls_by_name"][name] = (
                 summary["tool_calls_by_name"].get(name, 0) + int(count)
+            )
+        for name, count in runtime_counts.items():
+            summary["runtime_helper_calls_by_name"][name] = (
+                summary["runtime_helper_calls_by_name"].get(name, 0) + int(count)
+            )
+        for name, count in runtime_errors.items():
+            summary["runtime_helper_errors_by_name"][name] = (
+                summary["runtime_helper_errors_by_name"].get(name, 0) + int(count)
+            )
+        for name, count in direct_counts.items():
+            summary["direct_helper_calls_by_name"][name] = (
+                summary["direct_helper_calls_by_name"].get(name, 0) + int(count)
             )
         first_tool = tel.get("first_tool")
         if first_tool:
@@ -256,6 +346,18 @@ def _aggregate_task_telemetry(results: list) -> dict:
             summary["tasks_with_any_tool_call"] += 1
         if tel.get("used_inspection_tool"):
             summary["tasks_with_inspection_tool"] += 1
+        if tel.get("used_runtime_helper"):
+            summary["tasks_with_runtime_helper"] += 1
+        if tel.get("used_runtime_inspection_helper"):
+            summary["tasks_with_runtime_inspection_helper"] += 1
+        if tel.get("used_runtime_static_scan"):
+            summary["tasks_with_runtime_static_scan"] += 1
+        if tel.get("used_direct_helper"):
+            summary["tasks_with_direct_helper"] += 1
+        if tel.get("used_direct_inspection_helper"):
+            summary["tasks_with_direct_inspection_helper"] += 1
+        if tel.get("used_direct_static_scan"):
+            summary["tasks_with_direct_static_scan"] += 1
         if tel.get("used_static_scan"):
             summary["tasks_with_static_scan"] += 1
         if tel.get("used_read_file"):
@@ -275,6 +377,18 @@ def _aggregate_task_telemetry(results: list) -> dict:
         summary["inspection_tool_use_rate"] = (
             summary["tasks_with_inspection_tool"] / n_tasks
         )
+        summary["runtime_helper_use_rate"] = (
+            summary["tasks_with_runtime_helper"] / n_tasks
+        )
+        summary["runtime_inspection_helper_use_rate"] = (
+            summary["tasks_with_runtime_inspection_helper"] / n_tasks
+        )
+        summary["direct_helper_use_rate"] = (
+            summary["tasks_with_direct_helper"] / n_tasks
+        )
+        summary["direct_inspection_helper_use_rate"] = (
+            summary["tasks_with_direct_inspection_helper"] / n_tasks
+        )
         summary["immediate_finalize_rate"] = (
             summary["tasks_finalized_on_step_1"] / n_tasks
         )
@@ -282,10 +396,23 @@ def _aggregate_task_telemetry(results: list) -> dict:
         summary["avg_llm_calls_per_task"] = 0.0
         summary["tool_use_rate"] = 0.0
         summary["inspection_tool_use_rate"] = 0.0
+        summary["runtime_helper_use_rate"] = 0.0
+        summary["runtime_inspection_helper_use_rate"] = 0.0
+        summary["direct_helper_use_rate"] = 0.0
+        summary["direct_inspection_helper_use_rate"] = 0.0
         summary["immediate_finalize_rate"] = 0.0
 
     summary["tool_calls_by_name"] = dict(sorted(summary["tool_calls_by_name"].items()))
     summary["first_tool_counts"] = dict(sorted(summary["first_tool_counts"].items()))
+    summary["runtime_helper_calls_by_name"] = dict(sorted(
+        summary["runtime_helper_calls_by_name"].items()
+    ))
+    summary["runtime_helper_errors_by_name"] = dict(sorted(
+        summary["runtime_helper_errors_by_name"].items()
+    ))
+    summary["direct_helper_calls_by_name"] = dict(sorted(
+        summary["direct_helper_calls_by_name"].items()
+    ))
     return summary
 
 
@@ -507,11 +634,14 @@ def _run_task_protocol(
     deadline = time.monotonic() + timeout_s
     task_usage = {"prompt_tokens": 0, "completion_tokens": 0, "n_calls": 0}
     task_telemetry = _new_task_telemetry()
+    runtime_helper_telemetry = {}
     task_id = task.get("id") if isinstance(task, dict) else None
 
     def _with_protocol_stats(payload: dict) -> dict:
         payload["usage"] = task_usage
-        payload["telemetry"] = _finalize_task_telemetry(task_telemetry)
+        payload["telemetry"] = _finalize_task_telemetry(
+            task_telemetry, runtime_helper_telemetry
+        )
         return payload
 
     try:
@@ -543,6 +673,11 @@ def _run_task_protocol(
             continue
         kind = env.get("_kind") if isinstance(env, dict) else None
         if kind == "llm_request":
+            runtime_snapshot = _runtime_helper_snapshot(
+                env.get("runtime_helper_telemetry")
+            )
+            if runtime_snapshot:
+                runtime_helper_telemetry = runtime_snapshot
             response_env = llm_handler(env)
             if response_env.get("ok"):
                 u = response_env.get("usage", {})
@@ -565,7 +700,14 @@ def _run_task_protocol(
                 result["task_id"] = task_id
             # Orchestrator-tracked usage is ground truth.
             result["usage"] = task_usage
-            result["telemetry"] = _finalize_task_telemetry(task_telemetry)
+            runtime_snapshot = _runtime_helper_snapshot(
+                result.get("runtime_helper_telemetry")
+            )
+            if runtime_snapshot:
+                runtime_helper_telemetry = runtime_snapshot
+            result["telemetry"] = _finalize_task_telemetry(
+                task_telemetry, runtime_helper_telemetry
+            )
             return result
         else:
             if log_event:
@@ -881,6 +1023,12 @@ def run_candidate(
                 first_tool=(r.get("telemetry") or {}).get("first_tool"),
                 finalized_on_step=(r.get("telemetry") or {}).get("finalized_on_step"),
                 used_inspection_tool=(r.get("telemetry") or {}).get("used_inspection_tool"),
+                runtime_helper_calls_by_name=(
+                    r.get("telemetry") or {}
+                ).get("runtime_helper_calls_by_name", {}),
+                direct_helper_calls_by_name=(
+                    r.get("telemetry") or {}
+                ).get("direct_helper_calls_by_name", {}),
             )
             if "error" in r:
                 log_event("error_task", task_id=task.get("id"), error=r["error"])

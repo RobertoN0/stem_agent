@@ -47,6 +47,11 @@ _PROTECTED_TOOLS = frozenset([
     "_set_rpc_channels",
     "_set_task_context",
     "_safe_path",
+    "_reset_runtime_helper_telemetry",
+    "_bump_runtime_helper_count",
+    "_record_runtime_helper_call",
+    "_record_runtime_helper_error",
+    "_runtime_helper_telemetry_snapshot",
 ])
 
 _PROTECTED_FILES = frozenset([
