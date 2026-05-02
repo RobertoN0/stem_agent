@@ -1,3 +1,5 @@
+The final report for Task 1 of the can be found here: [docs/final_report.md](docs/final_report.md)
+
 # Stem Agent
 
 This repository contains a runnable self-modifying agent experiment for binary
@@ -66,7 +68,6 @@ Documentation:
   tool interfaces, and experiment flow
 - [docs/results.md](docs/results.md): publishable result summary and reproduction
   commands
-- [docs/final_report.md](docs/final_report.md): final report
 
 ## Setup
 
