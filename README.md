@@ -1,160 +1,148 @@
 # Stem Agent
 
-A self-modifying LLM agent for security-focused code analysis. The agent
-starts as a minimal "stem" with generic tools and evolves itself, generation
-by generation, into a specialized agent for vulnerability detection on
-PrimeVul.
+This repository contains a runnable self-modifying agent experiment for binary
+vulnerability classification. The agent starts from a small seed, runs on
+PrimeVul-derived code snippets, reflects on train-only feedback, proposes edits
+to its own mutable files, and accepts a candidate only when validation macro-F1
+strictly improves with zero execution errors.
 
-## Architecture Rules
+Task labels:
 
-- `orchestrator.py` is fixed rollback infrastructure; the evolving agent must
-  never edit it.
-- The immutable `mutation_manifest.yaml` defines the snapshot and mutation
-  boundary. Current mutable roots are `agent/`, `tools/`, `knowledge/`, and
-  `self_model/`.
-- Kernel paths (`orchestrator.py`, `growth/`, `eval/`, `sandbox/`, tests,
-  configs, data, and artifacts) are not candidate-editable.
-- `tools/base.py` has protected RPC/filesystem symbols; future generations may
-  add helper tools or edit non-protected functions through manifest-checked
-  proposals.
-- Each experiment keeps candidate snapshots under
-  `artifacts/runs/<run_id>/generations/gen_N/`; snapshots are append-only
-  runtime artifacts and are not committed.
-- Candidates run in Docker subprocesses, never imported into the host
-  orchestrator process.
-- Train, validation, and test splits are kept separate: validation gates
-  evolution, and test is reserved for final reporting.
-- Reflection runs as a read-only self-inspection loop: it can inspect selected
-  train cases, mutable snapshot files, and filtered repo contracts through
-  tools. It can also list/read bounded repo files outside denied paths for
-  architecture self-inspection, then submits a manifest-checked proposal for
-  the next candidate.
+- `vulnerable`
+- `safe`
 
-## Prerequisites
+The final result is intentionally conservative: the evolved agent improved
+validation performance, but the held-out test showed that this improvement did
+not generalize beyond the seed.
 
-- **Python 3.11+**
-- **Docker** — every candidate generation runs in a Docker subprocess with
-  resource limits and network disabled. The orchestrator will not work
-  without a working Docker daemon. Install Docker Engine (Linux) or Docker
-  Desktop (macOS/Windows) and confirm with:
+## Final Status
 
-  ```sh
-  docker run --rm hello-world
-  ```
+Primary final run:
 
-- An **OpenAI API key**.
+- evolution run: `artifacts/runs/run_20260501_175346`
+- best validation generation: `artifacts/runs/run_20260501_175346/generations/gen_2`
+- seed test benchmark: `artifacts/runs/final_test_seed_20260501`
+- evolved test benchmark: `artifacts/runs/final_test_gen2_20260501`
+
+Validation trajectory:
+
+| Generation | Main Change | Validation Macro-F1 | Gate |
+| ---: | --- | ---: | --- |
+| 0 | seed | 0.670 | baseline |
+| 1 | prompt decision policy | 0.733 | accepted |
+| 2 | refined prompt policy | 0.792 | accepted, best |
+| 3 | solve-loop forced scan gate | 0.670 | rejected |
+| 4 | more prompt specialization | 0.601 | rejected |
+| 5 | solve-loop pre-scan edit | smoke failed | rejected |
+
+Held-out test benchmark:
+
+| Agent | Test Macro-F1 | Accuracy | Errors | LLM Calls |
+| --- | ---: | ---: | ---: | ---: |
+| seed `gen_0` | 0.753 | 0.767 | 0 | 82 |
+| evolved `gen_2` | 0.733 | 0.750 | 0 | 62 |
+
+## Repository Guide
+
+Core runtime and evolution code:
+
+- [orchestrator.py](orchestrator.py): host-side evolution loop, gating, logging,
+  and rollback
+- [agent/](agent/): mutable runtime agent, prompt, and local editing rules
+- [tools/](tools/): mutable sandbox tools with protected core functions
+- [knowledge/](knowledge/): mutable learned task-strategy memory
+- [self_model/](self_model/): mutable architecture, capability, and failure-mode
+  memory
+- [growth/](growth/): immutable reflection, manifest, and proposal-application
+  kernel
+- [eval/](eval/): dataset and benchmark utilities
+- [sandbox/](sandbox/): Docker runner for candidate generations
+- [mutation_manifest.yaml](mutation_manifest.yaml): authoritative
+  mutable/immutable boundary
+
+Documentation:
+
+- [docs/architecture_workflow.md](docs/architecture_workflow.md): architecture,
+  tool interfaces, and experiment flow
+- [docs/results.md](docs/results.md): publishable result summary and reproduction
+  commands
+- [docs/final_report.md](docs/final_report.md): final report
 
 ## Setup
 
-1. Clone the repo and `cd` into it.
-2. Create and activate a virtualenv:
+Requirements:
 
-   ```sh
-   python3.11 -m venv .venv
-   source .venv/bin/activate
-   ```
+- Python 3.11+
+- Docker
+- OpenAI API key
 
-3. Install Python dependencies. There are two requirements files:
-   - `requirements.txt` — the minimal set baked into the sandbox image
-   - `requirements-host.txt` — adds host-only deps (`datasets`) for the
-     orchestrator and the dataset builder
+Install host dependencies:
 
-   On the host, install the full set:
+```sh
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-host.txt
+```
 
-   ```sh
-   pip install -r requirements-host.txt
-   ```
+Create `.env`:
 
-4. Create a `.env` file in the repo root with your API key:
+```sh
+OPENAI_API_KEY=sk-...
+```
 
-   ```
-   OPENAI_API_KEY=sk-...
-   ```
+Build the candidate sandbox image:
 
-   `.env` is gitignored — never commit it.
-
-5. Build the sandbox image (build context must be the repo root, since the
-   Dockerfile copies in `requirements.txt` and `sandbox/runner.py`):
-
-   ```sh
-   docker build -f sandbox/Dockerfile -t stem-agent-sandbox .
-   ```
+```sh
+docker build -f sandbox/Dockerfile -t stem-agent-sandbox .
+```
 
 ## Running
 
-The evolution loop is driven by the orchestrator:
+Run the final development evolution config:
 
 ```sh
-python orchestrator.py
+python orchestrator.py --config config.dev.yaml
 ```
 
-All tunables (models, generation caps, split sizes, stopping criteria, sandbox
-limits, token pricing) live in [config.yaml](config.yaml). Each run gets a
-timestamped directory under `artifacts/runs/`, containing:
+Each evolution run writes a new directory under `artifacts/runs/` containing:
 
-- `log.jsonl` — every orchestrator event (start, gates, accept/reject, errors)
-- `llm_calls.jsonl` — every proxied model call with usage and timing
-- `terminal_output.out` — the same human-readable progress stream printed to
-  the terminal, flushed automatically during the run
-- `config.snapshot.yaml` — copy of the active config at run start, so the run
-  is reproducible after config drifts
-- `mutation_manifest.snapshot.yaml` — copy of the immutable mutation boundary
-  used for that run
-- `proposals/gen_N.proposal.json` — full structured reflection proposal for
-  each attempted generation, kept outside candidate snapshots
-- `generations/gen_N/` — the full agent/tool snapshot for each generation in
-  that run
+- `log.jsonl`
+- `llm_calls.jsonl`
+- `terminal_output.out`
+- `config.snapshot.yaml`
+- `mutation_manifest.snapshot.yaml`
+- `proposals/gen_N.proposal.json`
+- `generations/gen_N/`
 
-## Dataset
+Run a frozen generation on held-out test:
 
-The dataset builder (`python -m eval.dataset`) tries Hugging Face sources
-in this order and uses the first that loads:
+```sh
+.venv/bin/python -m eval.benchmark \
+  --config config.dev.yaml \
+  --gen artifacts/runs/run_20260501_175346/generations/gen_2 \
+  --split test \
+  --run-id final_test_gen2_20260501
+```
 
-1. `colin/PrimeVul`
-2. `bstee615/bigvul`
-3. `DetectVul/devign`
-
-When a split cache is built, sizes come from the active config's `splits`
-section and are balanced 50/50 between vulnerable and safe with
-`random.seed(42)`. The chosen source and resulting cached sizes are recorded
-in `data/<data_dir>/_source.json`. At runtime, the orchestrator and benchmark
-also apply the active config's split sizes as caps over the cached JSONL files,
-so lowering `train` or `val` in a config makes quick experiments shorter
-without rebuilding the cache. Add `--force` to rebuild from scratch when you
-want newly sampled cached splits.
-
-## Sandbox network policy
-
-The candidate's container runs with `--network none`. The agent has no
-direct internet access; LLM calls go through `tools.base.llm_call`, which
-proxies a structured request back to the orchestrator via the runner's
-stdin/stdout RPC. The orchestrator makes the OpenAI call and returns the
-response. See `agent/AGENT.md` for the rule that bans `import openai` in
-agent code.
-
-## Cost tracking
-
-Cost numbers in the log come from the orchestrator's own tally of every
-LLM call's `usage.prompt_tokens` and `usage.completion_tokens` (read off
-the OpenAI API response), multiplied by the per-million-token prices in
-`config.yaml`'s `pricing` block. Because the orchestrator is the only
-process that talks to OpenAI, this is ground truth from our side — the
-agent cannot under-report. Cost is logged for auditability, not used as a
-stop gate. The OpenAI dashboard is still authoritative for the actual bill
-(rate-limit retries, tokenizer drift, etc.), but the in-log number is much
-closer than self-report would be.
+The held-out test should be used only after a generation has been selected from
+validation.
 
 ## Tests
+
+Run all tests:
 
 ```sh
 pytest tests/
 ```
 
-Tests mock the Docker subprocess, so they run without a Docker daemon.
+The tests mock Docker subprocess behavior, so most host-side tests do not need a
+running Docker daemon.
 
-## Layout
+## Dataset Reference
 
-Core source lives in `orchestrator.py`, `agent/`, `tools/`, `knowledge/`,
-`self_model/`, `growth/`, `eval/`, and `sandbox/`. Local agent-editing rules
-live in `agent/AGENT.md`; the authoritative mutation boundary lives in
-`mutation_manifest.yaml`.
+The vulnerability-classification task is based on PrimeVul:
+
+Yangruibo Ding, Yanjun Fu, Omniyyah Ibrahim, Chawin Sitawarin, Xinyun Chen,
+Basel Alomair, David Wagner, Baishakhi Ray, and Yizheng Chen. "Vulnerability
+Detection with Code Language Models: How Far Are We?" arXiv:2403.18624, 2024.
+https://arxiv.org/abs/2403.18624
