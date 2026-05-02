@@ -1,0 +1,38 @@
+# Stem Agent — larger development validation config.
+# Keeps config.yaml and data/primevul untouched for historical comparisons.
+
+paths:
+  artifacts_dir: artifacts
+  runs_dir: artifacts/runs
+  data_dir: data/primevul_dev
+  agent_dir: agent
+  tools_dir: tools
+
+model:
+  name: gpt-5.4
+  reflect_name: gpt-5.4
+
+budget:
+  max_generations: 15
+
+splits:
+  # Runtime caps over cached data/primevul_dev splits for faster final experiments.
+  train: 40
+  val: 20
+  test: 60
+
+stopping:
+  plateau_generations: 3
+
+sandbox:
+  image: stem-agent-sandbox
+  memory_mb: 1024
+  cpu_cores: 1
+  wall_clock_timeout_s: 300
+  reflect_wall_clock_timeout_s: 600
+  network: false
+
+pricing:
+  gpt-5.4:
+    input: 2.50
+    output: 15.00

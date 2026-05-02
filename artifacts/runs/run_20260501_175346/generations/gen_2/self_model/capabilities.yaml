@@ -1,0 +1,28 @@
+version: 1
+
+runtime:
+  visible_roots:
+    - /agent
+    - /work
+  callable_tools:
+    - read_file
+    - list_dir
+    - static_scan
+    - note
+    - finalize
+  notes:
+    - /agent is the read-only generation snapshot.
+    - /work is per-task scratch and is wiped between tasks.
+
+reflection:
+  can_read:
+    - train feedback selected by the orchestrator
+    - mutable generation snapshot files
+    - filtered read-only repository context
+  cannot_read:
+    - validation task contents
+    - test task contents
+    - data files
+    - run artifacts
+    - secrets or local handoff notes
+

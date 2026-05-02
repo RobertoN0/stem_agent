@@ -1,0 +1,209 @@
+[stem 21:27:19] terminal transcript path=/home/rober/Desktop/stem_agent_workspace/artifacts/runs/final_test_seed_20260501/terminal_output.out command=/home/rober/Desktop/stem_agent_workspace/.venv/bin/python /home/rober/Desktop/stem_agent_workspace/eval/benchmark.py --config config.dev.yaml --gen artifacts/runs/run_20260501_175346/generations/gen_0 --split test --run-id final_test_seed_20260501
+[stem 21:27:19] benchmark start gen=artifacts/runs/run_20260501_175346/generations/gen_0 split=test
+[stem 21:27:19] 
+eval start split=test tasks=60
+[stem 21:27:19] task 1/60 start id=primevul_90117
+[stem 21:27:22] llm purpose=solve_task task=primevul_90117 step=1 model=gpt-5.4 duration=2.5s tokens=811+86 response_tools=finalize
+[stem 21:27:22] task 1/60 done id=primevul_90117 status=ok pred=safe expected=safe calls=1
+[stem 21:27:22] task 2/60 start id=primevul_90131
+[stem 21:27:25] llm purpose=solve_task task=primevul_90131 step=1 model=gpt-5.4 duration=2.7s tokens=842+64 response_tools=finalize
+[stem 21:27:25] task 2/60 done id=primevul_90131 status=ok pred=safe expected=safe calls=1
+[stem 21:27:25] task 3/60 start id=primevul_195059
+[stem 21:27:27] llm purpose=solve_task task=primevul_195059 step=1 model=gpt-5.4 duration=1.6s tokens=1026+23 response_tools=static_scan
+[stem 21:27:29] llm purpose=solve_task task=primevul_195059 step=2 model=gpt-5.4 duration=2.0s tokens=1099+78 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:27:29] task 3/60 done id=primevul_195059 status=wrong pred=safe expected=vulnerable calls=2
+[stem 21:27:29] task 4/60 start id=primevul_90129
+[stem 21:27:31] llm purpose=solve_task task=primevul_90129 step=1 model=gpt-5.4 duration=2.0s tokens=749+77 response_tools=finalize
+[stem 21:27:31] task 4/60 done id=primevul_90129 status=ok pred=safe expected=safe calls=1
+[stem 21:27:31] task 5/60 start id=primevul_195019
+[stem 21:27:33] llm purpose=solve_task task=primevul_195019 step=1 model=gpt-5.4 duration=1.8s tokens=1357+92 response_tools=finalize
+[stem 21:27:33] task 5/60 done id=primevul_195019 status=ok pred=vulnerable expected=vulnerable calls=1
+[stem 21:27:33] task 6/60 start id=primevul_195063
+[stem 21:27:34] llm purpose=solve_task task=primevul_195063 step=1 model=gpt-5.4 duration=879ms tokens=2654+23 response_tools=static_scan
+[stem 21:27:37] llm purpose=solve_task task=primevul_195063 step=2 model=gpt-5.4 duration=2.4s tokens=2783+93 tool_results=static_scan:c_cpp:findings=1:ext=skipped response_tools=finalize
+[stem 21:27:37] task 6/60 done id=primevul_195063 status=ok pred=vulnerable expected=vulnerable calls=2
+[stem 21:27:37] task 7/60 start id=primevul_195073
+[stem 21:27:38] llm purpose=solve_task task=primevul_195073 step=1 model=gpt-5.4 duration=821ms tokens=1813+23 response_tools=static_scan
+[stem 21:27:40] llm purpose=solve_task task=primevul_195073 step=2 model=gpt-5.4 duration=2.2s tokens=1886+67 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:27:40] task 7/60 done id=primevul_195073 status=wrong pred=safe expected=vulnerable calls=2
+[stem 21:27:40] task 8/60 start id=primevul_90113
+[stem 21:27:42] llm purpose=solve_task task=primevul_90113 step=1 model=gpt-5.4 duration=1.9s tokens=769+58 response_tools=finalize
+[stem 21:27:42] task 8/60 done id=primevul_90113 status=ok pred=safe expected=safe calls=1
+[stem 21:27:42] task 9/60 start id=primevul_195029
+[stem 21:27:45] llm purpose=solve_task task=primevul_195029 step=1 model=gpt-5.4 duration=2.3s tokens=1248+84 response_tools=finalize
+[stem 21:27:45] task 9/60 done id=primevul_195029 status=wrong pred=safe expected=vulnerable calls=1
+[stem 21:27:45] task 10/60 start id=primevul_90126
+[stem 21:27:47] llm purpose=solve_task task=primevul_90126 step=1 model=gpt-5.4 duration=1.9s tokens=897+23 response_tools=static_scan
+[stem 21:27:49] llm purpose=solve_task task=primevul_90126 step=2 model=gpt-5.4 duration=1.6s tokens=970+66 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:27:49] task 10/60 done id=primevul_90126 status=ok pred=safe expected=safe calls=2
+[stem 21:27:49] task 11/60 start id=primevul_194989
+[stem 21:27:50] llm purpose=solve_task task=primevul_194989 step=1 model=gpt-5.4 duration=987ms tokens=1186+23 response_tools=static_scan
+[stem 21:27:52] llm purpose=solve_task task=primevul_194989 step=2 model=gpt-5.4 duration=2.4s tokens=1259+96 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:27:52] task 11/60 done id=primevul_194989 status=ok pred=vulnerable expected=vulnerable calls=2
+[stem 21:27:52] task 12/60 start id=primevul_195085
+[stem 21:27:53] llm purpose=solve_task task=primevul_195085 step=1 model=gpt-5.4 duration=967ms tokens=2402+23 response_tools=static_scan
+[stem 21:27:56] llm purpose=solve_task task=primevul_195085 step=2 model=gpt-5.4 duration=2.6s tokens=2475+95 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:27:56] task 12/60 done id=primevul_195085 status=wrong pred=safe expected=vulnerable calls=2
+[stem 21:27:56] task 13/60 start id=primevul_194994
+[stem 21:27:57] llm purpose=solve_task task=primevul_194994 step=1 model=gpt-5.4 duration=858ms tokens=2200+23 response_tools=static_scan
+[stem 21:27:59] llm purpose=solve_task task=primevul_194994 step=2 model=gpt-5.4 duration=2.1s tokens=2317+95 tool_results=static_scan:c_cpp:findings=1:ext=skipped response_tools=finalize
+[stem 21:27:59] task 13/60 done id=primevul_194994 status=wrong pred=safe expected=vulnerable calls=2
+[stem 21:27:59] task 14/60 start id=primevul_195037
+[stem 21:28:00] llm purpose=solve_task task=primevul_195037 step=1 model=gpt-5.4 duration=824ms tokens=1892+23 response_tools=static_scan
+[stem 21:28:02] llm purpose=solve_task task=primevul_195037 step=2 model=gpt-5.4 duration=2.1s tokens=1965+104 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:28:03] task 14/60 done id=primevul_195037 status=ok pred=vulnerable expected=vulnerable calls=2
+[stem 21:28:03] task 15/60 start id=primevul_195040
+[stem 21:28:04] llm purpose=solve_task task=primevul_195040 step=1 model=gpt-5.4 duration=1.7s tokens=1299+64 response_tools=finalize
+[stem 21:28:04] task 15/60 done id=primevul_195040 status=wrong pred=safe expected=vulnerable calls=1
+[stem 21:28:04] task 16/60 start id=primevul_90125
+[stem 21:28:06] llm purpose=solve_task task=primevul_90125 step=1 model=gpt-5.4 duration=1.6s tokens=733+59 response_tools=finalize
+[stem 21:28:06] task 16/60 done id=primevul_90125 status=ok pred=safe expected=safe calls=1
+[stem 21:28:06] task 17/60 start id=primevul_90120
+[stem 21:28:08] llm purpose=solve_task task=primevul_90120 step=1 model=gpt-5.4 duration=1.7s tokens=762+52 response_tools=finalize
+[stem 21:28:08] task 17/60 done id=primevul_90120 status=ok pred=safe expected=safe calls=1
+[stem 21:28:08] task 18/60 start id=primevul_90123
+[stem 21:28:10] llm purpose=solve_task task=primevul_90123 step=1 model=gpt-5.4 duration=1.5s tokens=733+65 response_tools=finalize
+[stem 21:28:10] task 18/60 done id=primevul_90123 status=ok pred=safe expected=safe calls=1
+[stem 21:28:10] task 19/60 start id=primevul_90119
+[stem 21:28:12] llm purpose=solve_task task=primevul_90119 step=1 model=gpt-5.4 duration=1.8s tokens=897+73 response_tools=finalize
+[stem 21:28:12] task 19/60 done id=primevul_90119 status=ok pred=safe expected=safe calls=1
+[stem 21:28:12] task 20/60 start id=primevul_195038
+[stem 21:28:14] llm purpose=solve_task task=primevul_195038 step=1 model=gpt-5.4 duration=2.0s tokens=1046+80 response_tools=finalize
+[stem 21:28:14] task 20/60 done id=primevul_195038 status=wrong pred=safe expected=vulnerable calls=1
+[stem 21:28:14] task 21/60 start id=primevul_90116
+[stem 21:28:16] llm purpose=solve_task task=primevul_90116 step=1 model=gpt-5.4 duration=1.7s tokens=761+54 response_tools=finalize
+[stem 21:28:16] task 21/60 done id=primevul_90116 status=ok pred=safe expected=safe calls=1
+[stem 21:28:16] task 22/60 start id=primevul_195092
+[stem 21:28:17] llm purpose=solve_task task=primevul_195092 step=1 model=gpt-5.4 duration=731ms tokens=1162+23 response_tools=static_scan
+[stem 21:28:20] llm purpose=solve_task task=primevul_195092 step=2 model=gpt-5.4 duration=2.9s tokens=1235+94 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:28:20] task 22/60 done id=primevul_195092 status=wrong pred=safe expected=vulnerable calls=2
+[stem 21:28:20] task 23/60 start id=primevul_90115
+[stem 21:28:22] llm purpose=solve_task task=primevul_90115 step=1 model=gpt-5.4 duration=1.7s tokens=874+65 response_tools=finalize
+[stem 21:28:22] task 23/60 done id=primevul_90115 status=ok pred=safe expected=safe calls=1
+[stem 21:28:22] task 24/60 start id=primevul_195067
+[stem 21:28:24] llm purpose=solve_task task=primevul_195067 step=1 model=gpt-5.4 duration=2.0s tokens=1148+98 response_tools=finalize
+[stem 21:28:24] task 24/60 done id=primevul_195067 status=ok pred=vulnerable expected=vulnerable calls=1
+[stem 21:28:24] task 25/60 start id=primevul_90122
+[stem 21:28:28] llm purpose=solve_task task=primevul_90122 step=1 model=gpt-5.4 duration=3.0s tokens=744+60 response_tools=finalize
+[stem 21:28:28] task 25/60 done id=primevul_90122 status=ok pred=safe expected=safe calls=1
+[stem 21:28:28] task 26/60 start id=primevul_90132
+[stem 21:28:30] llm purpose=solve_task task=primevul_90132 step=1 model=gpt-5.4 duration=1.8s tokens=829+69 response_tools=finalize
+[stem 21:28:30] task 26/60 done id=primevul_90132 status=ok pred=safe expected=safe calls=1
+[stem 21:28:30] task 27/60 start id=primevul_195056
+[stem 21:28:31] llm purpose=solve_task task=primevul_195056 step=1 model=gpt-5.4 duration=987ms tokens=1634+23 response_tools=static_scan
+[stem 21:28:33] llm purpose=solve_task task=primevul_195056 step=2 model=gpt-5.4 duration=2.5s tokens=1707+119 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:28:33] task 27/60 done id=primevul_195056 status=wrong pred=safe expected=vulnerable calls=2
+[stem 21:28:33] task 28/60 start id=primevul_90104
+[stem 21:28:36] llm purpose=solve_task task=primevul_90104 step=1 model=gpt-5.4 duration=2.2s tokens=941+64 response_tools=finalize
+[stem 21:28:36] task 28/60 done id=primevul_90104 status=ok pred=safe expected=safe calls=1
+[stem 21:28:36] task 29/60 start id=primevul_90118
+[stem 21:28:37] llm purpose=solve_task task=primevul_90118 step=1 model=gpt-5.4 duration=1.2s tokens=908+23 response_tools=static_scan
+[stem 21:28:39] llm purpose=solve_task task=primevul_90118 step=2 model=gpt-5.4 duration=1.9s tokens=981+82 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:28:39] task 29/60 done id=primevul_90118 status=ok pred=safe expected=safe calls=2
+[stem 21:28:39] task 30/60 start id=primevul_90124
+[stem 21:28:41] llm purpose=solve_task task=primevul_90124 step=1 model=gpt-5.4 duration=1.7s tokens=747+66 response_tools=finalize
+[stem 21:28:41] task 30/60 done id=primevul_90124 status=ok pred=safe expected=safe calls=1
+[stem 21:28:41] task 31/60 start id=primevul_195069
+[stem 21:28:43] llm purpose=solve_task task=primevul_195069 step=1 model=gpt-5.4 duration=1.9s tokens=1355+107 response_tools=finalize
+[stem 21:28:43] task 31/60 done id=primevul_195069 status=ok pred=vulnerable expected=vulnerable calls=1
+[stem 21:28:43] task 32/60 start id=primevul_194963
+[stem 21:28:45] llm purpose=solve_task task=primevul_194963 step=1 model=gpt-5.4 duration=1.2s tokens=3042+23 response_tools=static_scan
+[stem 21:28:47] llm purpose=solve_task task=primevul_194963 step=2 model=gpt-5.4 duration=2.1s tokens=3115+75 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:28:47] task 32/60 done id=primevul_194963 status=wrong pred=safe expected=vulnerable calls=2
+[stem 21:28:47] task 33/60 start id=primevul_90130
+[stem 21:28:49] llm purpose=solve_task task=primevul_90130 step=1 model=gpt-5.4 duration=1.5s tokens=735+66 response_tools=finalize
+[stem 21:28:49] task 33/60 done id=primevul_90130 status=ok pred=safe expected=safe calls=1
+[stem 21:28:49] task 34/60 start id=primevul_90107
+[stem 21:28:50] llm purpose=solve_task task=primevul_90107 step=1 model=gpt-5.4 duration=1.6s tokens=737+68 response_tools=finalize
+[stem 21:28:50] task 34/60 done id=primevul_90107 status=ok pred=safe expected=safe calls=1
+[stem 21:28:50] task 35/60 start id=primevul_195095
+[stem 21:28:51] llm purpose=solve_task task=primevul_195095 step=1 model=gpt-5.4 duration=877ms tokens=1682+23 response_tools=static_scan
+[stem 21:28:54] llm purpose=solve_task task=primevul_195095 step=2 model=gpt-5.4 duration=2.1s tokens=1755+97 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:28:54] task 35/60 done id=primevul_195095 status=ok pred=vulnerable expected=vulnerable calls=2
+[stem 21:28:54] task 36/60 start id=primevul_90110
+[stem 21:28:55] llm purpose=solve_task task=primevul_90110 step=1 model=gpt-5.4 duration=1.4s tokens=791+58 response_tools=finalize
+[stem 21:28:55] task 36/60 done id=primevul_90110 status=ok pred=safe expected=safe calls=1
+[stem 21:28:55] task 37/60 start id=primevul_195082
+[stem 21:28:56] llm purpose=solve_task task=primevul_195082 step=1 model=gpt-5.4 duration=862ms tokens=1076+23 response_tools=static_scan
+[stem 21:28:58] llm purpose=solve_task task=primevul_195082 step=2 model=gpt-5.4 duration=1.8s tokens=1149+75 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:28:58] task 37/60 done id=primevul_195082 status=wrong pred=safe expected=vulnerable calls=2
+[stem 21:28:58] task 38/60 start id=primevul_194998
+[stem 21:28:59] llm purpose=solve_task task=primevul_194998 step=1 model=gpt-5.4 duration=895ms tokens=1376+23 response_tools=static_scan
+[stem 21:29:01] llm purpose=solve_task task=primevul_194998 step=2 model=gpt-5.4 duration=2.0s tokens=1449+103 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:29:02] task 38/60 done id=primevul_194998 status=ok pred=vulnerable expected=vulnerable calls=2
+[stem 21:29:02] task 39/60 start id=primevul_90112
+[stem 21:29:03] llm purpose=solve_task task=primevul_90112 step=1 model=gpt-5.4 duration=1.7s tokens=1049+73 response_tools=finalize
+[stem 21:29:04] task 39/60 done id=primevul_90112 status=ok pred=safe expected=safe calls=1
+[stem 21:29:04] task 40/60 start id=primevul_90127
+[stem 21:29:08] llm purpose=solve_task task=primevul_90127 step=1 model=gpt-5.4 duration=4.0s tokens=737+67 response_tools=finalize
+[stem 21:29:08] task 40/60 done id=primevul_90127 status=ok pred=safe expected=safe calls=1
+[stem 21:29:08] task 41/60 start id=primevul_195028
+[stem 21:29:10] llm purpose=solve_task task=primevul_195028 step=1 model=gpt-5.4 duration=1.8s tokens=1792+73 response_tools=finalize
+[stem 21:29:10] task 41/60 done id=primevul_195028 status=wrong pred=safe expected=vulnerable calls=1
+[stem 21:29:10] task 42/60 start id=primevul_90114
+[stem 21:29:12] llm purpose=solve_task task=primevul_90114 step=1 model=gpt-5.4 duration=1.7s tokens=761+57 response_tools=finalize
+[stem 21:29:12] task 42/60 done id=primevul_90114 status=ok pred=safe expected=safe calls=1
+[stem 21:29:12] task 43/60 start id=primevul_195026
+[stem 21:29:13] llm purpose=solve_task task=primevul_195026 step=1 model=gpt-5.4 duration=1.1s tokens=1249+23 response_tools=static_scan
+[stem 21:29:15] llm purpose=solve_task task=primevul_195026 step=2 model=gpt-5.4 duration=1.9s tokens=1322+83 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:29:15] task 43/60 done id=primevul_195026 status=wrong pred=safe expected=vulnerable calls=2
+[stem 21:29:15] task 44/60 start id=primevul_195022
+[stem 21:29:16] llm purpose=solve_task task=primevul_195022 step=1 model=gpt-5.4 duration=870ms tokens=2128+23 response_tools=static_scan
+[stem 21:29:18] llm purpose=solve_task task=primevul_195022 step=2 model=gpt-5.4 duration=2.1s tokens=2201+90 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:29:19] task 44/60 done id=primevul_195022 status=ok pred=vulnerable expected=vulnerable calls=2
+[stem 21:29:19] task 45/60 start id=primevul_194996
+[stem 21:29:20] llm purpose=solve_task task=primevul_194996 step=1 model=gpt-5.4 duration=1.7s tokens=1020+90 response_tools=finalize
+[stem 21:29:20] task 45/60 done id=primevul_194996 status=ok pred=vulnerable expected=vulnerable calls=1
+[stem 21:29:20] task 46/60 start id=primevul_195017
+[stem 21:29:23] llm purpose=solve_task task=primevul_195017 step=1 model=gpt-5.4 duration=2.2s tokens=882+96 response_tools=finalize
+[stem 21:29:23] task 46/60 done id=primevul_195017 status=ok pred=vulnerable expected=vulnerable calls=1
+[stem 21:29:23] task 47/60 start id=primevul_90105
+[stem 21:29:24] llm purpose=solve_task task=primevul_90105 step=1 model=gpt-5.4 duration=1.4s tokens=765+56 response_tools=finalize
+[stem 21:29:25] task 47/60 done id=primevul_90105 status=ok pred=safe expected=safe calls=1
+[stem 21:29:25] task 48/60 start id=primevul_90106
+[stem 21:29:26] llm purpose=solve_task task=primevul_90106 step=1 model=gpt-5.4 duration=1.3s tokens=761+63 response_tools=finalize
+[stem 21:29:26] task 48/60 done id=primevul_90106 status=ok pred=safe expected=safe calls=1
+[stem 21:29:26] task 49/60 start id=primevul_195023
+[stem 21:29:28] llm purpose=solve_task task=primevul_195023 step=1 model=gpt-5.4 duration=1.2s tokens=2053+23 response_tools=static_scan
+[stem 21:29:29] llm purpose=solve_task task=primevul_195023 step=2 model=gpt-5.4 duration=1.8s tokens=2126+98 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:29:29] task 49/60 done id=primevul_195023 status=ok pred=vulnerable expected=vulnerable calls=2
+[stem 21:29:29] task 50/60 start id=primevul_195039
+[stem 21:29:31] llm purpose=solve_task task=primevul_195039 step=1 model=gpt-5.4 duration=952ms tokens=1661+23 response_tools=static_scan
+[stem 21:29:32] llm purpose=solve_task task=primevul_195039 step=2 model=gpt-5.4 duration=1.9s tokens=1734+121 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:29:33] task 50/60 done id=primevul_195039 status=ok pred=vulnerable expected=vulnerable calls=2
+[stem 21:29:33] task 51/60 start id=primevul_195074
+[stem 21:29:34] llm purpose=solve_task task=primevul_195074 step=1 model=gpt-5.4 duration=1.0s tokens=1629+23 response_tools=static_scan
+[stem 21:29:36] llm purpose=solve_task task=primevul_195074 step=2 model=gpt-5.4 duration=2.4s tokens=1702+111 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:29:36] task 51/60 done id=primevul_195074 status=ok pred=vulnerable expected=vulnerable calls=2
+[stem 21:29:36] task 52/60 start id=primevul_195083
+[stem 21:29:38] llm purpose=solve_task task=primevul_195083 step=1 model=gpt-5.4 duration=2.0s tokens=1024+93 response_tools=finalize
+[stem 21:29:38] task 52/60 done id=primevul_195083 status=ok pred=vulnerable expected=vulnerable calls=1
+[stem 21:29:38] task 53/60 start id=primevul_90128
+[stem 21:29:40] llm purpose=solve_task task=primevul_90128 step=1 model=gpt-5.4 duration=1.7s tokens=748+63 response_tools=finalize
+[stem 21:29:40] task 53/60 done id=primevul_90128 status=ok pred=safe expected=safe calls=1
+[stem 21:29:40] task 54/60 start id=primevul_195091
+[stem 21:29:43] llm purpose=solve_task task=primevul_195091 step=1 model=gpt-5.4 duration=2.6s tokens=1343+85 response_tools=finalize
+[stem 21:29:43] task 54/60 done id=primevul_195091 status=wrong pred=safe expected=vulnerable calls=1
+[stem 21:29:43] task 55/60 start id=primevul_90111
+[stem 21:29:44] llm purpose=solve_task task=primevul_90111 step=1 model=gpt-5.4 duration=858ms tokens=935+23 response_tools=static_scan
+[stem 21:29:46] llm purpose=solve_task task=primevul_90111 step=2 model=gpt-5.4 duration=1.6s tokens=1008+61 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:29:46] task 55/60 done id=primevul_90111 status=ok pred=safe expected=safe calls=2
+[stem 21:29:46] task 56/60 start id=primevul_90133
+[stem 21:29:49] llm purpose=solve_task task=primevul_90133 step=1 model=gpt-5.4 duration=2.7s tokens=733+62 response_tools=finalize
+[stem 21:29:49] task 56/60 done id=primevul_90133 status=ok pred=safe expected=safe calls=1
+[stem 21:29:49] task 57/60 start id=primevul_195055
+[stem 21:29:51] llm purpose=solve_task task=primevul_195055 step=1 model=gpt-5.4 duration=1.8s tokens=1549+85 response_tools=finalize
+[stem 21:29:51] task 57/60 done id=primevul_195055 status=ok pred=vulnerable expected=vulnerable calls=1
+[stem 21:29:51] task 58/60 start id=primevul_90108
+[stem 21:29:52] llm purpose=solve_task task=primevul_90108 step=1 model=gpt-5.4 duration=775ms tokens=888+23 response_tools=static_scan
+[stem 21:29:54] llm purpose=solve_task task=primevul_90108 step=2 model=gpt-5.4 duration=2.1s tokens=961+83 tool_results=static_scan:c_cpp:findings=0:ext=skipped response_tools=finalize
+[stem 21:29:54] task 58/60 done id=primevul_90108 status=ok pred=safe expected=safe calls=2
+[stem 21:29:54] task 59/60 start id=primevul_90109
+[stem 21:29:56] llm purpose=solve_task task=primevul_90109 step=1 model=gpt-5.4 duration=1.6s tokens=744+62 response_tools=finalize
+[stem 21:29:56] task 59/60 done id=primevul_90109 status=ok pred=safe expected=safe calls=1
+[stem 21:29:56] task 60/60 start id=primevul_90121
+[stem 21:29:58] llm purpose=solve_task task=primevul_90121 step=1 model=gpt-5.4 duration=1.7s tokens=774+69 response_tools=finalize
+[stem 21:29:58] task 60/60 done id=primevul_90121 status=ok pred=safe expected=safe calls=1
+[stem 21:29:58] 
+eval done split=test macro_f1=0.753 accuracy=0.767 errors=0 cost=$0.3489 calls=82
+

@@ -1,0 +1,101 @@
+version: 1
+
+# Directories copied into each generation snapshot and mounted read-only at
+# /agent inside the sandbox.
+snapshot_roots:
+  - agent
+  - tools
+  - knowledge
+  - self_model
+
+# Candidate proposals may only create, replace, or delete paths matching these
+# globs. Kernel paths stay outside the generation snapshot.
+mutable_paths:
+  - agent/**
+  - tools/**
+  - knowledge/**
+  - self_model/**
+
+# These files may be replaced, but not deleted.
+protected_files:
+  - agent/agent.py
+  - agent/prompt.txt
+  - tools/base.py
+
+# Paths that are never mutable and should not be exposed as raw reflection
+# examples. Selected files can still appear as API summaries via the explicit
+# reflection_context allowlist below.
+protected_paths:
+  - orchestrator.py
+  - growth/**
+  - eval/**
+  - sandbox/**
+  - tests/**
+  - config*.yaml
+  - mutation_manifest.yaml
+  - data/**
+  - artifacts/**
+  - .env
+  - .codex
+  - .codex/**
+  - .git
+  - .git/**
+  - PROJECT_GROUND_TRUTH.md
+  - CODEX_ONBOARDING.md
+  - CLAUDE.md
+
+protected_symbols:
+  tools/base.py:
+    - llm_call
+    - read_file
+    - write_file
+    - list_dir
+    - run_bash
+    - note
+    - _set_rpc_channels
+    - _set_task_context
+    - _safe_path
+    - _reset_runtime_helper_telemetry
+    - _bump_runtime_helper_count
+    - _record_runtime_helper_call
+    - _record_runtime_helper_error
+    - _runtime_helper_telemetry_snapshot
+
+reflection_context:
+  max_tree_files: 160
+  max_file_chars: 4000
+  max_snapshot_file_chars: 12000
+  deny_paths:
+    - data/**
+    - artifacts/**
+    - .env
+    - .codex
+    - .codex/**
+    - .git
+    - .git/**
+    - PROJECT_GROUND_TRUTH.md
+    - CODEX_ONBOARDING.md
+    - CLAUDE.md
+    - __pycache__/**
+    - .venv/**
+  files:
+    - path: README.md
+      mode: excerpt
+    - path: config.yaml
+      mode: excerpt
+    - path: config.dev.yaml
+      mode: excerpt
+    - path: agent/AGENT.md
+      mode: excerpt
+    - path: mutation_manifest.yaml
+      mode: excerpt
+    - path: orchestrator.py
+      mode: api
+    - path: growth/apply.py
+      mode: api
+    - path: growth/reflect.py
+      mode: api
+    - path: eval/benchmark.py
+      mode: api
+    - path: sandbox/runner.py
+      mode: api
